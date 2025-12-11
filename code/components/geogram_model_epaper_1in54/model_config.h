@@ -58,6 +58,14 @@
 #define PWR_VBAT_OFF_LEVEL      0
 
 // ============================================================================
+// SD Card Configuration (1-bit SDMMC mode)
+// ============================================================================
+#define SDCARD_D0_PIN           GPIO_NUM_40
+#define SDCARD_CLK_PIN          GPIO_NUM_39
+#define SDCARD_CMD_PIN          GPIO_NUM_41
+#define SDCARD_MOUNT_POINT      "/sdcard"
+
+// ============================================================================
 // Backlight/LED Configuration
 // ============================================================================
 #define BACKLIGHT_PIN           GPIO_NUM_3
@@ -93,6 +101,10 @@
 
 #ifndef HAS_PSRAM
 #define HAS_PSRAM               1
+#endif
+
+#ifndef HAS_SDCARD
+#define HAS_SDCARD              1
 #endif
 
 #endif // MODEL_CONFIG_H

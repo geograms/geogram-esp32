@@ -8,6 +8,7 @@
 #include "shtc3.h"
 #include "button_bsp.h"
 #include "lvgl_port.h"
+#include "sdcard.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -22,6 +23,7 @@ static i2c_dev_handle_t s_rtc_i2c = NULL;
 static i2c_dev_handle_t s_shtc3_i2c = NULL;
 static button_handle_t s_boot_button = NULL;
 static button_handle_t s_power_button = NULL;
+static bool s_sdcard_mounted = false;
 
 static void button_event_handler(gpio_num_t gpio, button_event_t event, void *user_data) {
     const char *btn_name = (gpio == BTN_PIN_BOOT) ? "BOOT(GPIO0)" : "POWER(GPIO18)";
@@ -166,11 +168,30 @@ esp_err_t model_init(void) {
         ESP_LOGW(TAG, "Failed to create power button");
     }
 
+    // Initialize SD card
+#if HAS_SDCARD
+    ret = sdcard_init();
+    if (ret == ESP_OK) {
+        s_sdcard_mounted = true;
+        ESP_LOGI(TAG, "SD card mounted (%.2f GB)", sdcard_get_capacity_gb());
+    } else {
+        ESP_LOGI(TAG, "No SD card or card not readable");
+        s_sdcard_mounted = false;
+    }
+#endif
+
     ESP_LOGI(TAG, "Board initialization complete");
     return ESP_OK;
 }
 
 esp_err_t model_deinit(void) {
+#if HAS_SDCARD
+    if (s_sdcard_mounted) {
+        sdcard_deinit();
+        s_sdcard_mounted = false;
+    }
+#endif
+
     if (s_boot_button) {
         button_delete(s_boot_button);
         s_boot_button = NULL;
@@ -212,4 +233,12 @@ pcf85063_handle_t model_get_rtc(void) {
 
 shtc3_handle_t model_get_env_sensor(void) {
     return s_env_sensor;
+}
+
+bool model_has_sdcard(void) {
+#if HAS_SDCARD
+    return s_sdcard_mounted && sdcard_is_mounted();
+#else
+    return false;
+#endif
 }

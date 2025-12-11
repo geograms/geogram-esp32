@@ -1,6 +1,7 @@
 #ifndef MODEL_INIT_H
 #define MODEL_INIT_H
 
+#include <stdbool.h>
 #include "esp_err.h"
 #include "epaper_1in54.h"
 #include "pcf85063.h"
@@ -45,6 +46,13 @@ pcf85063_handle_t model_get_rtc(void);
  * @return shtc3_handle_t Sensor handle or NULL
  */
 shtc3_handle_t model_get_env_sensor(void);
+
+/**
+ * @brief Check if SD card is available and mounted
+ *
+ * @return true if SD card is mounted
+ */
+bool model_has_sdcard(void);
 
 #ifdef __cplusplus
 }

@@ -18,8 +18,10 @@ static const char *TAG = "shtc3";
 // CRC polynomial
 #define CRC_POLYNOMIAL        0x31
 
-// Temperature calibration offset (can be adjusted per board)
-#define SHTC3_TEMP_OFFSET     0.0f
+// Temperature calibration offset (in Celsius) to compensate for ESP32 self-heating
+// The sensor is inside the enclosure and reads higher than ambient
+// Manufacturer example uses 4 degrees Celsius offset
+#define SHTC3_TEMP_OFFSET_C   4.0f
 
 struct shtc3_dev {
     i2c_dev_handle_t i2c_handle;
@@ -199,7 +201,7 @@ esp_err_t shtc3_read(shtc3_handle_t handle, shtc3_data_t *data) {
     uint16_t raw_humi = (raw[3] << 8) | raw[4];
 
     // Temperature formula: T = -45 + 175 * raw / 65536
-    data->temperature = 175.0f * (float)raw_temp / 65536.0f - 45.0f - SHTC3_TEMP_OFFSET;
+    data->temperature = 175.0f * (float)raw_temp / 65536.0f - 45.0f - SHTC3_TEMP_OFFSET_C;
 
     // Humidity formula: RH = raw / 65536 * 100
     data->humidity = 100.0f * (float)raw_humi / 65536.0f;
