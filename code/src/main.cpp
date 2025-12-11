@@ -8,6 +8,9 @@
 // Station API
 #include "station.h"
 
+// Serial console
+#include "console.h"
+
 // Include board-specific model initialization
 #if BOARD_MODEL == MODEL_ESP32S3_EPAPER_1IN54
     #include "model_config.h"
@@ -230,6 +233,14 @@ extern "C" void app_main(void)
     }
 
     ESP_LOGI(TAG, "Board initialized successfully");
+
+    // Initialize serial console
+    ret = console_init();
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG, "Failed to initialize console: %s", esp_err_to_name(ret));
+    } else {
+        ESP_LOGI(TAG, "Serial console initialized");
+    }
 
 #if BOARD_MODEL == MODEL_ESP32S3_EPAPER_1IN54
     // Get hardware handles
