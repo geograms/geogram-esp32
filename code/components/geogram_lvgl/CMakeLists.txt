@@ -5,7 +5,7 @@ if(CONFIG_IDF_TARGET_ESP32S3)
     idf_component_register(
         SRCS "lvgl_port.c"
         INCLUDE_DIRS "."
-        REQUIRES lvgl geogram_epaper_1in54 log
+        REQUIRES lvgl geogram_epaper_1in54 log nvs_flash
         PRIV_REQUIRES freertos esp_timer heap
     )
 else()

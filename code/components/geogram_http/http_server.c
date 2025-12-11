@@ -1,6 +1,6 @@
 /**
  * @file http_server.c
- * @brief HTTP server for WiFi configuration
+ * @brief HTTP server for WiFi configuration and Geogram Station API
  */
 
 #include <stdio.h>
@@ -10,11 +10,14 @@
 #include "esp_log.h"
 #include "nvs_flash.h"
 #include "nvs.h"
+#include "station.h"
+#include "ws_server.h"
 
 static const char *TAG = "http_server";
 
 static httpd_handle_t s_server = NULL;
 static wifi_config_callback_t s_config_callback = NULL;
+static bool s_station_api_enabled = false;
 
 // HTML configuration page
 static const char *CONFIG_PAGE_HTML =
@@ -195,7 +198,7 @@ static esp_err_t connect_post_handler(httpd_req_t *req)
 }
 
 /**
- * @brief Handler for status endpoint (JSON)
+ * @brief Handler for status endpoint (JSON) - basic
  */
 static esp_err_t status_get_handler(httpd_req_t *req)
 {
@@ -204,6 +207,20 @@ static esp_err_t status_get_handler(httpd_req_t *req)
 
     httpd_resp_set_type(req, "application/json");
     httpd_resp_send(req, response, strlen(response));
+    return ESP_OK;
+}
+
+/**
+ * @brief Handler for /api/status endpoint - full station status
+ */
+static esp_err_t api_status_get_handler(httpd_req_t *req)
+{
+    char response[512];
+    size_t len = station_build_status_json(response, sizeof(response));
+
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
+    httpd_resp_send(req, response, len);
     return ESP_OK;
 }
 
@@ -228,7 +245,19 @@ static const httpd_uri_t uri_status = {
     .user_ctx = NULL
 };
 
+static const httpd_uri_t uri_api_status = {
+    .uri = "/api/status",
+    .method = HTTP_GET,
+    .handler = api_status_get_handler,
+    .user_ctx = NULL
+};
+
 esp_err_t http_server_start(wifi_config_callback_t callback)
+{
+    return http_server_start_ex(callback, false);
+}
+
+esp_err_t http_server_start_ex(wifi_config_callback_t callback, bool enable_station_api)
 {
     if (s_server != NULL) {
         ESP_LOGW(TAG, "Server already running");
@@ -236,11 +265,17 @@ esp_err_t http_server_start(wifi_config_callback_t callback)
     }
 
     s_config_callback = callback;
+    s_station_api_enabled = enable_station_api;
 
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.lru_purge_enable = true;
 
-    ESP_LOGI(TAG, "Starting HTTP server on port %d", config.server_port);
+    // Increase max URI handlers if station API is enabled
+    if (enable_station_api) {
+        config.max_uri_handlers = 10;
+    }
+
+    ESP_LOGI(TAG, "Starting HTTP server on port %d (station_api=%d)", config.server_port, enable_station_api);
 
     esp_err_t ret = httpd_start(&s_server, &config);
     if (ret != ESP_OK) {
@@ -248,10 +283,23 @@ esp_err_t http_server_start(wifi_config_callback_t callback)
         return ret;
     }
 
-    // Register URI handlers
+    // Register base URI handlers
     httpd_register_uri_handler(s_server, &uri_root);
     httpd_register_uri_handler(s_server, &uri_connect);
     httpd_register_uri_handler(s_server, &uri_status);
+
+    // Register Station API handlers if enabled
+    if (enable_station_api) {
+        httpd_register_uri_handler(s_server, &uri_api_status);
+
+        // Register WebSocket handler
+        ret = ws_server_register(s_server);
+        if (ret != ESP_OK) {
+            ESP_LOGW(TAG, "Failed to register WebSocket handler: %s", esp_err_to_name(ret));
+        }
+
+        ESP_LOGI(TAG, "Station API endpoints registered");
+    }
 
     ESP_LOGI(TAG, "HTTP server started");
     return ESP_OK;
@@ -274,4 +322,9 @@ esp_err_t http_server_stop(void)
 bool http_server_is_running(void)
 {
     return s_server != NULL;
+}
+
+httpd_handle_t http_server_get_handle(void)
+{
+    return s_server;
 }

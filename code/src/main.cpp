@@ -5,6 +5,9 @@
 #include "esp_log.h"
 #include "app_config.h"
 
+// Station API
+#include "station.h"
+
 // Include board-specific model initialization
 #if BOARD_MODEL == MODEL_ESP32S3_EPAPER_1IN54
     #include "model_config.h"
@@ -20,6 +23,8 @@
 #elif BOARD_MODEL == MODEL_ESP32_GENERIC
     #include "model_config.h"
     #include "model_init.h"
+    #include "wifi_bsp.h"
+    #include "http_server.h"
 #else
     #error "Invalid BOARD_MODEL defined!"
 #endif
@@ -55,8 +60,13 @@ static void wifi_event_cb(geogram_wifi_status_t status, void *event_data)
             geogram_ui_show_status("WiFi Connected");
             geogram_ui_refresh(false);
 
-            // Stop AP mode and HTTP server after successful connection
+            // Stop AP mode HTTP server and start Station API server
             http_server_stop();
+
+            // Initialize and start Station API
+            station_init();
+            http_server_start_ex(NULL, true);  // Station API enabled
+            ESP_LOGI(TAG, "Station API started - callsign: %s", station_get_callsign());
             break;
 
         case GEOGRAM_WIFI_STATUS_DISCONNECTED:

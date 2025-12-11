@@ -13,8 +13,13 @@
 #include "esp_timer.h"
 #include "esp_log.h"
 #include "esp_task_wdt.h"
+#include "nvs.h"
 
 static const char *TAG = "lvgl_port";
+
+// NVS namespace and key for rotation persistence
+#define NVS_NAMESPACE "display"
+#define NVS_KEY_ROTATION "rotation"
 
 #define LVGL_TASK_PRIORITY      5
 #define LVGL_TASK_STACK_SIZE    4096
@@ -37,6 +42,52 @@ static TaskHandle_t s_lvgl_task = NULL;
 static SemaphoreHandle_t s_lvgl_mutex = NULL;
 static bool s_use_full_refresh = false;
 static int s_rotation_degrees = 0;  // Current rotation: 0, 90, 180, 270
+
+/**
+ * @brief Load rotation from NVS
+ */
+static void load_rotation_from_nvs(void)
+{
+    nvs_handle_t nvs_handle;
+    esp_err_t err = nvs_open(NVS_NAMESPACE, NVS_READONLY, &nvs_handle);
+    if (err == ESP_OK) {
+        int32_t rotation = 0;
+        err = nvs_get_i32(nvs_handle, NVS_KEY_ROTATION, &rotation);
+        if (err == ESP_OK) {
+            // Validate rotation value
+            if (rotation == 0 || rotation == 90 || rotation == 180 || rotation == 270) {
+                s_rotation_degrees = (int)rotation;
+                ESP_LOGI(TAG, "Loaded rotation from NVS: %d degrees", s_rotation_degrees);
+            }
+        } else if (err == ESP_ERR_NVS_NOT_FOUND) {
+            ESP_LOGI(TAG, "No saved rotation found, using default: 0 degrees");
+        }
+        nvs_close(nvs_handle);
+    } else {
+        ESP_LOGW(TAG, "Failed to open NVS for reading rotation: %s", esp_err_to_name(err));
+    }
+}
+
+/**
+ * @brief Save rotation to NVS
+ */
+static void save_rotation_to_nvs(void)
+{
+    nvs_handle_t nvs_handle;
+    esp_err_t err = nvs_open(NVS_NAMESPACE, NVS_READWRITE, &nvs_handle);
+    if (err == ESP_OK) {
+        err = nvs_set_i32(nvs_handle, NVS_KEY_ROTATION, (int32_t)s_rotation_degrees);
+        if (err == ESP_OK) {
+            err = nvs_commit(nvs_handle);
+            if (err == ESP_OK) {
+                ESP_LOGI(TAG, "Saved rotation to NVS: %d degrees", s_rotation_degrees);
+            }
+        }
+        nvs_close(nvs_handle);
+    } else {
+        ESP_LOGW(TAG, "Failed to open NVS for writing rotation: %s", esp_err_to_name(err));
+    }
+}
 
 /**
  * @brief Transform coordinates based on rotation
@@ -144,6 +195,9 @@ esp_err_t lvgl_port_init(epaper_1in54_handle_t epaper_handle)
     }
 
     s_epaper = epaper_handle;
+
+    // Load saved rotation from NVS
+    load_rotation_from_nvs();
 
     // Create mutex for thread safety
     s_lvgl_mutex = xSemaphoreCreateMutex();
@@ -271,6 +325,9 @@ void lvgl_port_rotate_cw(void)
     // Cycle through rotations: 0 -> 90 -> 180 -> 270 -> 0
     s_rotation_degrees = (s_rotation_degrees + 90) % 360;
     ESP_LOGI(TAG, "Display rotation set to %d degrees", s_rotation_degrees);
+
+    // Save rotation to NVS for persistence across reboots
+    save_rotation_to_nvs();
 
     // Trigger a full refresh to apply rotation
     s_use_full_refresh = true;
