@@ -1,0 +1,32 @@
+# PlatformIO build artifacts
+.pio/
+.pioenvs/
+.piolibdeps/
+
+# ESP-IDF build artifacts
+build/
+sdkconfig
+sdkconfig.old
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Compiled files
+*.o
+*.a
+*.elf
+*.bin
+*.map
+*.dblite
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Managed components (downloaded automatically)
+managed_components/
+dependencies.lock
