@@ -11,6 +11,12 @@
 // Serial console
 #include "console.h"
 
+// Telnet server
+#include "telnet_server.h"
+
+// SSH server
+#include "geogram_ssh.h"
+
 // Include board-specific model initialization
 #if BOARD_MODEL == MODEL_ESP32S3_EPAPER_1IN54
     #include "model_config.h"
@@ -70,6 +76,16 @@ static void wifi_event_cb(geogram_wifi_status_t status, void *event_data)
             station_init();
             http_server_start_ex(NULL, true);  // Station API enabled
             ESP_LOGI(TAG, "Station API started - callsign: %s", station_get_callsign());
+
+            // Start Telnet server for remote CLI access
+            if (telnet_server_start(TELNET_DEFAULT_PORT) == ESP_OK) {
+                ESP_LOGI(TAG, "Telnet server started on port %d", TELNET_DEFAULT_PORT);
+            }
+
+            // Start SSH server for secure CLI access
+            if (geogram_ssh_start(GEOGRAM_SSH_DEFAULT_PORT) == ESP_OK) {
+                ESP_LOGI(TAG, "SSH server started on port %d", GEOGRAM_SSH_DEFAULT_PORT);
+            }
             break;
 
         case GEOGRAM_WIFI_STATUS_DISCONNECTED:
@@ -79,6 +95,10 @@ static void wifi_event_cb(geogram_wifi_status_t status, void *event_data)
             geogram_ui_update_wifi(UI_WIFI_STATUS_DISCONNECTED, NULL, NULL);
             geogram_ui_show_status("WiFi Disconnected");
             geogram_ui_refresh(false);
+
+            // Stop Telnet and SSH servers
+            telnet_server_stop();
+            geogram_ssh_stop();
             break;
 
         case GEOGRAM_WIFI_STATUS_AP_STARTED:

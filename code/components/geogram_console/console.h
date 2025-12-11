@@ -80,6 +80,7 @@ void register_system_commands(void);
 void register_wifi_commands(void);
 void register_display_commands(void);
 void register_config_commands(void);
+void register_ssh_commands(void);
 
 #ifdef __cplusplus
 }

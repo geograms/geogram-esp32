@@ -1,5 +1,6 @@
 #include "station.h"
 #include "json_utils.h"
+#include "nostr_keys.h"
 #include <esp_log.h>
 #include <esp_wifi.h>
 #include <esp_timer.h>
@@ -11,17 +12,6 @@ static const char *TAG = "Station";
 // Singleton station state
 static station_state_t s_station = {0};
 
-// Generate callsign from MAC address (format: ESP + last 4 hex chars)
-static void generate_callsign(void) {
-    uint8_t mac[6];
-    esp_wifi_get_mac(WIFI_IF_STA, mac);
-
-    snprintf(s_station.callsign, sizeof(s_station.callsign),
-             "ESP%02X%02X", mac[4], mac[5]);
-
-    ESP_LOGI(TAG, "Generated callsign: %s", s_station.callsign);
-}
-
 void station_init(void) {
     if (s_station.initialized) {
         return;
@@ -29,8 +19,19 @@ void station_init(void) {
 
     memset(&s_station, 0, sizeof(s_station));
 
-    // Generate callsign from MAC
-    generate_callsign();
+    // Initialize NOSTR keys and derive callsign
+    esp_err_t ret = nostr_keys_init();
+    if (ret == ESP_OK) {
+        const char *callsign = nostr_keys_get_callsign();
+        if (callsign) {
+            strncpy(s_station.callsign, callsign, sizeof(s_station.callsign) - 1);
+            s_station.callsign[sizeof(s_station.callsign) - 1] = '\0';
+        }
+    } else {
+        ESP_LOGE(TAG, "Failed to initialize NOSTR keys: %s", esp_err_to_name(ret));
+        // Fallback to a default callsign
+        strncpy(s_station.callsign, "X3XXXX", sizeof(s_station.callsign));
+    }
 
     // Set station name
     snprintf(s_station.name, sizeof(s_station.name), "Geogram ESP32 Station");

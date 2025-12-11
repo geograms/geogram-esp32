@@ -29,7 +29,7 @@ typedef struct {
 
 // Station state
 typedef struct {
-    char callsign[STATION_CALLSIGN_LEN];    // Station callsign (generated from MAC)
+    char callsign[STATION_CALLSIGN_LEN];    // Station callsign (X3 + npub derived)
     char name[STATION_NAME_LEN];            // Station name
     uint32_t start_time;                    // Boot timestamp (epoch seconds)
     station_client_t clients[STATION_MAX_CLIENTS];
@@ -37,7 +37,7 @@ typedef struct {
     bool initialized;
 } station_state_t;
 
-// Initialize station (generates callsign from MAC address)
+// Initialize station (generates NOSTR keys and X3 callsign)
 void station_init(void);
 
 // Get station state (singleton)

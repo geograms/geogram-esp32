@@ -155,6 +155,7 @@ esp_err_t console_init(void)
     register_wifi_commands();
     register_display_commands();
     register_config_commands();
+    register_ssh_commands();
 
     // Start console task
     s_running = true;
