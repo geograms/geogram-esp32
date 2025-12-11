@@ -10,6 +10,7 @@
 #include "lvgl_port.h"
 #include "sdcard.h"
 #include "esp_log.h"
+#include "nvs_flash.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
@@ -67,6 +68,21 @@ esp_err_t model_init(void) {
     esp_err_t ret;
 
     ESP_LOGI(TAG, "Initializing %s (%s)", MODEL_NAME, MODEL_VARIANT);
+
+    // Initialize NVS early (needed for display rotation persistence)
+    ret = nvs_flash_init();
+    if (ret == ESP_ERR_NVS_NO_FREE_PAGES) {
+        // NVS partition was truncated and needs to be erased
+        ESP_LOGW(TAG, "NVS no free pages, erasing...");
+        ESP_ERROR_CHECK(nvs_flash_erase());
+        ret = nvs_flash_init();
+    }
+    // Note: We don't erase on ESP_ERR_NVS_NEW_VERSION_FOUND to preserve user settings
+    if (ret != ESP_OK && ret != ESP_ERR_NVS_NEW_VERSION_FOUND) {
+        ESP_LOGE(TAG, "NVS init failed: %s", esp_err_to_name(ret));
+        return ret;
+    }
+    ESP_LOGI(TAG, "NVS initialized");
 
     // Initialize power management
     ret = board_power_init();

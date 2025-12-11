@@ -81,6 +81,13 @@ void geogram_ui_show_status(const char *message);
  */
 void geogram_ui_refresh(bool full_refresh);
 
+/**
+ * @brief Update uptime display
+ *
+ * @param uptime_seconds Uptime in seconds
+ */
+void geogram_ui_update_uptime(uint32_t uptime_seconds);
+
 #ifdef __cplusplus
 }
 #endif

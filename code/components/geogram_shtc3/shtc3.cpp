@@ -20,8 +20,8 @@ static const char *TAG = "shtc3";
 
 // Temperature calibration offset (in Celsius) to compensate for ESP32 self-heating
 // The sensor is inside the enclosure and reads higher than ambient
-// Manufacturer example uses 4 degrees Celsius offset
-#define SHTC3_TEMP_OFFSET_C   4.0f
+// Adjusted based on real-world testing
+#define SHTC3_TEMP_OFFSET_C   6.0f
 
 struct shtc3_dev {
     i2c_dev_handle_t i2c_handle;

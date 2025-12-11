@@ -21,6 +21,7 @@ static lv_obj_t *s_lbl_date = NULL;
 static lv_obj_t *s_lbl_wifi_status = NULL;
 static lv_obj_t *s_lbl_ip_address = NULL;
 static lv_obj_t *s_lbl_status = NULL;
+static lv_obj_t *s_lbl_uptime = NULL;
 
 // Styles
 static lv_style_t s_style_title;
@@ -138,9 +139,15 @@ esp_err_t geogram_ui_init(void)
     lv_obj_set_pos(s_lbl_wifi_status, 15, 132);
 
     s_lbl_ip_address = lv_label_create(s_screen);
-    lv_obj_add_style(s_lbl_ip_address, &s_style_title, 0);
+    lv_obj_add_style(s_lbl_ip_address, &s_style_small, 0);
     lv_label_set_text(s_lbl_ip_address, "");
     lv_obj_set_pos(s_lbl_ip_address, 15, 150);
+
+    // Uptime display (right side)
+    s_lbl_uptime = lv_label_create(s_screen);
+    lv_obj_add_style(s_lbl_uptime, &s_style_small, 0);
+    lv_label_set_text(s_lbl_uptime, "Up: 0m");
+    lv_obj_set_pos(s_lbl_uptime, 140, 150);
 
     // Separator before status
     create_separator(s_screen, 170);
@@ -194,10 +201,22 @@ void geogram_ui_update_wifi(ui_wifi_status_t status, const char *ip_address, con
                 lv_label_set_text(s_lbl_wifi_status, "Disconnected");
                 break;
             case UI_WIFI_STATUS_CONNECTING:
-                lv_label_set_text(s_lbl_wifi_status, "Connecting...");
+                if (ssid != NULL) {
+                    char buf[32];
+                    snprintf(buf, sizeof(buf), "-> %.16s", ssid);
+                    lv_label_set_text(s_lbl_wifi_status, buf);
+                } else {
+                    lv_label_set_text(s_lbl_wifi_status, "Connecting...");
+                }
                 break;
             case UI_WIFI_STATUS_AP_MODE:
-                lv_label_set_text(s_lbl_wifi_status, "AP Mode");
+                if (ssid != NULL) {
+                    char buf[32];
+                    snprintf(buf, sizeof(buf), "AP: %.14s", ssid);
+                    lv_label_set_text(s_lbl_wifi_status, buf);
+                } else {
+                    lv_label_set_text(s_lbl_wifi_status, "AP Mode");
+                }
                 break;
             case UI_WIFI_STATUS_CONNECTED:
                 if (ssid != NULL) {
@@ -270,4 +289,29 @@ void geogram_ui_show_status(const char *message)
 void geogram_ui_refresh(bool full_refresh)
 {
     lvgl_port_refresh(full_refresh);
+}
+
+void geogram_ui_update_uptime(uint32_t uptime_seconds)
+{
+    if (!lvgl_port_lock(100)) {
+        return;
+    }
+
+    if (s_lbl_uptime != NULL) {
+        char buf[16];
+        uint32_t minutes = uptime_seconds / 60;
+        uint32_t hours = minutes / 60;
+        uint32_t days = hours / 24;
+
+        if (days > 0) {
+            snprintf(buf, sizeof(buf), "Up: %lud%luh", (unsigned long)days, (unsigned long)(hours % 24));
+        } else if (hours > 0) {
+            snprintf(buf, sizeof(buf), "Up: %luh%lum", (unsigned long)hours, (unsigned long)(minutes % 60));
+        } else {
+            snprintf(buf, sizeof(buf), "Up: %lum", (unsigned long)minutes);
+        }
+        lv_label_set_text(s_lbl_uptime, buf);
+    }
+
+    lvgl_port_unlock();
 }

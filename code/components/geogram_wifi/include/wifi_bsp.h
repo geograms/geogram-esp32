@@ -122,6 +122,14 @@ esp_err_t geogram_wifi_get_ip(char *ip_str);
 esp_err_t geogram_wifi_get_ap_ip(char *ip_str);
 
 /**
+ * @brief Get AP IP address as uint32_t
+ *
+ * @param ip_addr Pointer to store IP address
+ * @return esp_err_t ESP_OK on success
+ */
+esp_err_t geogram_wifi_get_ap_ip_addr(uint32_t *ip_addr);
+
+/**
  * @brief Load saved WiFi credentials from NVS
  *
  * @param ssid Buffer for SSID (at least 33 bytes)

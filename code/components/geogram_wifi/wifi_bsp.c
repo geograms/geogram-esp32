@@ -95,13 +95,19 @@ esp_err_t geogram_wifi_init(void)
         return ESP_OK;
     }
 
-    // Initialize NVS
+    // Initialize NVS (may already be initialized by model_init)
     esp_err_t ret = nvs_flash_init();
-    if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+    if (ret == ESP_ERR_NVS_NO_FREE_PAGES) {
+        // Only erase if truly no free pages, not on version mismatch
+        ESP_LOGW(TAG, "NVS no free pages, erasing...");
         ESP_ERROR_CHECK(nvs_flash_erase());
         ret = nvs_flash_init();
     }
-    ESP_ERROR_CHECK(ret);
+    // Ignore already initialized error - this is expected
+    if (ret != ESP_OK && ret != ESP_ERR_NVS_NEW_VERSION_FOUND) {
+        ESP_LOGE(TAG, "NVS init failed: %s", esp_err_to_name(ret));
+        return ret;
+    }
 
     // Initialize TCP/IP stack
     ESP_ERROR_CHECK(esp_netif_init());
@@ -284,6 +290,28 @@ esp_err_t geogram_wifi_get_ap_ip(char *ip_str)
     }
 
     sprintf(ip_str, IPSTR, IP2STR(&ip_info.ip));
+    return ESP_OK;
+}
+
+esp_err_t geogram_wifi_get_ap_ip_addr(uint32_t *ip_addr)
+{
+    if (ip_addr == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    if (s_ap_netif == NULL) {
+        *ip_addr = 0;
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    esp_netif_ip_info_t ip_info;
+    esp_err_t ret = esp_netif_get_ip_info(s_ap_netif, &ip_info);
+    if (ret != ESP_OK) {
+        *ip_addr = 0;
+        return ret;
+    }
+
+    *ip_addr = ip_info.ip.addr;
     return ESP_OK;
 }
 
