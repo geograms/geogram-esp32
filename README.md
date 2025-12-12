@@ -38,20 +38,70 @@ The primary supported board with full feature implementation:
 
 ## Features
 
+### Network & Connectivity
+
 - **WiFi Configuration Portal**
   - Starts in AP mode ("Geogram-Setup") when no credentials saved
   - Web-based configuration page for entering WiFi credentials
   - Credentials stored in NVS (non-volatile storage)
+  - Auto-reconnection with retry logic
+
+- **FTP Server** (Port 21)
+  - SD card file management over FTP
+  - Upload, download, delete files remotely
+  - Uses device password when configured, anonymous access otherwise
+  - CLI commands: `ftp status`, `ftp start`, `ftp stop`
+
+- **Telnet Server** (Port 23)
+  - Remote CLI access over the network
+  - Full command-line interface remotely
+
+- **Serial Console**
+  - Interactive CLI over USB serial (115200 baud)
+  - Commands for WiFi, display, FTP, SSH, system status
+  - JSON output mode for automation
+
+### Location & Maps
+
+- **IP Geolocation**
+  - Automatic location detection via ip-api.com
+  - City, country, coordinates, timezone
+
+- **Map Tiles**
+  - OSM map tile fetching and display
+  - SD card caching for offline access
+  - Multiple map styles supported
+
+### Updates & Monitoring
+
+- **OTA Update Mirror**
+  - GitHub release polling for firmware updates
+  - Automatic check for new versions
+
+- **NTP Time Sync**
+  - Automatic time synchronization when connected
+  - RTC backup for offline timekeeping
+
+- **Sensor Monitoring**
+  - Temperature and humidity updates every 30 seconds
+  - Battery voltage monitoring
+  - Display refresh every 60 seconds to prevent ghosting
+
+### Display & UI
 
 - **E-Paper Display UI**
   - Temperature and humidity readings
   - Time and date display (from RTC)
   - WiFi connection status and IP address
+  - Location information
   - Status messages
 
-- **Sensor Monitoring**
-  - Temperature and humidity updates every 30 seconds
-  - Display refresh every 60 seconds to prevent ghosting
+- **SD Card Support**
+  - FAT filesystem for data storage
+  - Map tile caching
+  - Configuration files
+
+### Architecture
 
 - **Modular Architecture**
   - Component-based design for easy board support
@@ -208,7 +258,19 @@ Default AP mode configuration (in `main.cpp`):
 |-----------|-------------|
 | `geogram_wifi` | WiFi station and AP mode management |
 | `geogram_http` | HTTP server for web configuration |
+| `geogram_console` | Serial CLI with command registration |
+| `geogram_telnet` | Telnet server for remote CLI |
+| `geogram_ftp` | FTP server for SD card access |
 | `geogram_common` | Shared types and utilities |
+
+### Network Services
+
+| Component | Description |
+|-----------|-------------|
+| `geogram_http_client` | Async HTTP client wrapper |
+| `geogram_geoloc` | IP-based geolocation service |
+| `geogram_tiles` | OSM map tile fetching/caching |
+| `geogram_updates` | GitHub release polling for OTA |
 
 ### Board-Specific Components
 
@@ -217,8 +279,43 @@ Default AP mode configuration (in `main.cpp`):
 | `geogram_epaper_1in54` | Waveshare 1.54" e-paper driver |
 | `geogram_shtc3` | Sensirion SHTC3 temp/humidity sensor |
 | `geogram_pcf85063` | NXP PCF85063 RTC driver |
+| `geogram_sdcard` | SD card filesystem support |
 | `geogram_lvgl` | LVGL graphics library port |
 | `geogram_ui` | Geogram UI widgets and screens |
+
+---
+
+## CLI Commands
+
+The device provides an interactive command-line interface via serial (USB) or Telnet:
+
+```
+geogram> help
+```
+
+### Available Commands
+
+| Command | Description |
+|---------|-------------|
+| `help` | List all available commands |
+| `status` | Show system status (WiFi, memory, uptime) |
+| `reboot` | Restart the device |
+| `wifi status` | Show WiFi connection info |
+| `wifi scan` | Scan for available networks |
+| `wifi connect <ssid> <pass>` | Connect to a network |
+| `display refresh` | Force display refresh |
+| `display rotate <0-3>` | Set screen rotation |
+| `ftp status` | Show FTP server status |
+| `ftp start` | Start FTP server |
+| `ftp stop` | Stop FTP server |
+| `config show` | Show device configuration |
+| `config password <pass>` | Set device password |
+
+### Remote Access
+
+- **Serial**: Connect via USB at 115200 baud
+- **Telnet**: Connect to device IP on port 23
+- **FTP**: Connect to device IP on port 21 for file management
 
 ---
 
@@ -277,15 +374,21 @@ ESP32 stations integrate with the broader Geogram ecosystem:
 ```
 
 **Current capabilities**:
-- WiFi network bridging
-- Status display
-- Environmental monitoring
+- WiFi network bridging with auto-reconnection
+- FTP server for SD card file management
+- Telnet/Serial CLI for remote configuration
+- IP geolocation and map tile caching
+- OTA update polling from GitHub releases
+- NTP time synchronization
+- Environmental monitoring (temp/humidity)
+- Status display on e-paper
 
 **Planned features**:
 - BLE beacon for device discovery
 - Message relay and forwarding
 - NOSTR relay connection
 - Power management and deep sleep
+- SFTP server (when memory permits)
 
 ---
 
