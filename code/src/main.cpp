@@ -26,11 +26,15 @@
 // DNS server for captive portal
 #include "dns_server.h"
 
+// IP geolocation for timezone
+#include "geoloc.h"
+
 // Include board-specific model initialization
 #if BOARD_MODEL == MODEL_ESP32S3_EPAPER_1IN54
     #include "model_config.h"
     #include "model_init.h"
     #include "board_power.h"
+    #include "button_bsp.h"
     #include "epaper_1in54.h"
     #include "shtc3.h"
     #include "pcf85063.h"
@@ -38,6 +42,10 @@
     #include "geogram_ui.h"
     #include "wifi_bsp.h"
     #include "http_server.h"
+    #include "sdcard.h"
+    #include "tiles.h"
+    #include "updates.h"
+    #include "ftp_server.h"
 #elif BOARD_MODEL == MODEL_ESP32_GENERIC
     #include "model_config.h"
     #include "model_init.h"
@@ -64,6 +72,88 @@ static bool s_wifi_connected = false;
 static char s_current_ip[16] = {0};
 static bool s_ntp_synced = false;
 static pcf85063_handle_t s_rtc_handle = NULL;
+static bool s_ap_mode_active = false;
+static TaskHandle_t s_network_services_task = NULL;
+static epaper_1in54_handle_t s_display_handle = NULL;
+static button_handle_t s_power_button = NULL;
+
+// Flag to trigger shutdown from main loop (avoids blocking button callback)
+static volatile bool s_shutdown_requested = false;
+
+/**
+ * @brief Perform device shutdown - clear display and enter deep sleep
+ */
+static void device_shutdown(void)
+{
+    ESP_LOGI(TAG, "Shutdown initiated - clearing display and entering deep sleep");
+
+    // Turn on backlight so user can see the shutdown message
+    board_power_backlight_on();
+
+    // Show shutdown message
+    geogram_ui_show_status("Powering off...");
+    geogram_ui_refresh(false);
+
+    // Give time for partial refresh to show the message
+    vTaskDelay(pdMS_TO_TICKS(1000));
+
+    // Now blank the e-paper display completely
+    if (s_display_handle != NULL) {
+        ESP_LOGI(TAG, "Blanking e-paper display...");
+
+        // Re-initialize display for full refresh mode (needed for clean blank)
+        epaper_1in54_init(s_display_handle);
+
+        // Clear buffer to all white
+        epaper_1in54_clear(s_display_handle);
+
+        // Send to display with full refresh (this does a proper e-paper clear cycle)
+        epaper_1in54_refresh(s_display_handle);
+
+        // Wait for the e-paper refresh to complete
+        vTaskDelay(pdMS_TO_TICKS(2000));
+
+        ESP_LOGI(TAG, "Display blanked");
+    }
+
+    // Turn off backlight
+    board_power_backlight_off();
+
+    // Turn off peripherals
+    board_power_epd_off();
+    board_power_audio_off();
+
+    ESP_LOGI(TAG, "Entering deep sleep - press power button to wake");
+
+    // Enter deep sleep with power button wake-up (0 = external wake only)
+    board_power_deep_sleep(0);
+}
+
+/**
+ * @brief Power button event callback
+ */
+static void power_button_callback(gpio_num_t gpio, button_event_t event, void *user_data)
+{
+    switch (event) {
+        case BUTTON_EVENT_LONG_PRESS:
+            ESP_LOGI(TAG, "Power button long press detected - requesting shutdown");
+            s_shutdown_requested = true;  // Handle in main loop to avoid blocking callback
+            break;
+
+        case BUTTON_EVENT_CLICK:
+            ESP_LOGI(TAG, "Power button click - toggling backlight");
+            board_power_backlight_timed(3000);  // Turn on backlight for 3 seconds
+            break;
+
+        case BUTTON_EVENT_DOUBLE_CLICK:
+            ESP_LOGI(TAG, "Power button double click - force display refresh");
+            geogram_ui_refresh(true);  // Full refresh
+            break;
+
+        default:
+            break;
+    }
+}
 
 /**
  * @brief NTP time sync notification callback
@@ -109,16 +199,76 @@ static void init_sntp(void)
 {
     ESP_LOGI(TAG, "Initializing SNTP");
 
-    // Set timezone to UTC (can be configured later)
-    setenv("TZ", "UTC0", 1);
-    tzset();
-
     esp_sntp_setoperatingmode(SNTP_OPMODE_POLL);
     esp_sntp_setservername(0, "pool.ntp.org");
     esp_sntp_setservername(1, "time.nist.gov");
     esp_sntp_set_time_sync_notification_cb(ntp_sync_notification_cb);
     esp_sntp_init();
 }
+
+/**
+ * @brief Background task for network services (geolocation, NTP)
+ *
+ * This task runs slow network operations in the background to avoid
+ * blocking the main boot process and WiFi event handlers.
+ */
+static void network_services_task(void *pvParameter)
+{
+    ESP_LOGI(TAG, "Starting network services (background)...");
+
+    // Small delay to let WiFi stack stabilize
+    vTaskDelay(pdMS_TO_TICKS(500));
+
+    // Step 1: Fetch geolocation (sets timezone)
+    ESP_LOGI(TAG, "[Background] Fetching geolocation...");
+    geogram_ui_show_status("Getting location...");
+    geogram_ui_refresh(false);
+
+    geoloc_data_t geoloc;
+    if (geoloc_fetch(&geoloc) == ESP_OK) {
+        geoloc_apply_timezone();
+        ESP_LOGI(TAG, "[Background] Location: %s, %s", geoloc.city, geoloc.country);
+
+        // Update station with location data for API
+        station_set_location(geoloc.latitude, geoloc.longitude,
+                            geoloc.city, geoloc.country, geoloc.timezone);
+    } else {
+        ESP_LOGW(TAG, "[Background] Geolocation failed, using UTC");
+        setenv("TZ", "UTC0", 1);
+        tzset();
+    }
+
+    // Step 2: Initialize NTP (now that timezone is set)
+    ESP_LOGI(TAG, "[Background] Initializing NTP...");
+    geogram_ui_show_status("Syncing time...");
+    geogram_ui_refresh(false);
+
+    init_sntp();
+
+    // Wait a bit for NTP to sync (non-blocking check)
+    for (int i = 0; i < 10 && !s_ntp_synced; i++) {
+        vTaskDelay(pdMS_TO_TICKS(500));
+    }
+
+    if (s_ntp_synced) {
+        ESP_LOGI(TAG, "[Background] NTP synced successfully");
+    } else {
+        ESP_LOGW(TAG, "[Background] NTP sync pending (will complete in background)");
+    }
+
+    // Done - show connected status
+    geogram_ui_show_status("Connected");
+    geogram_ui_refresh(false);
+
+    ESP_LOGI(TAG, "Network services initialization complete");
+
+    // Task complete, delete self
+    s_network_services_task = NULL;
+    vTaskDelete(NULL);
+}
+
+// Forward declaration
+static void start_ap_mode(void);
 
 /**
  * @brief WiFi event callback
@@ -129,6 +279,7 @@ static void wifi_event_cb(geogram_wifi_status_t status, void *event_data)
         case GEOGRAM_WIFI_STATUS_GOT_IP:
             ESP_LOGI(TAG, "WiFi connected with IP");
             s_wifi_connected = true;
+            s_ap_mode_active = false;
             geogram_wifi_get_ip(s_current_ip);
             geogram_ui_update_wifi(UI_WIFI_STATUS_CONNECTED, s_current_ip, NULL);
             geogram_ui_show_status("WiFi Connected");
@@ -150,30 +301,61 @@ static void wifi_event_cb(geogram_wifi_status_t status, void *event_data)
                 ESP_LOGI(TAG, "Telnet server started on port %d", TELNET_DEFAULT_PORT);
             }
 
-            // Start SSH server for secure CLI access
-            if (geogram_ssh_start(GEOGRAM_SSH_DEFAULT_PORT) == ESP_OK) {
-                ESP_LOGI(TAG, "SSH server started on port %d", GEOGRAM_SSH_DEFAULT_PORT);
+            // SSH server disabled for now (libssh init issues)
+            // TODO: Re-enable once libssh threading is properly configured
+            // if (geogram_ssh_start(GEOGRAM_SSH_DEFAULT_PORT) == ESP_OK) {
+            //     ESP_LOGI(TAG, "SSH server started on port %d", GEOGRAM_SSH_DEFAULT_PORT);
+            // }
+
+            // Start update mirror polling (check GitHub every hour, first check after 1 minute)
+            if (updates_is_available()) {
+                updates_start_polling(60 * 60);  // 1 hour
+                ESP_LOGI(TAG, "Update mirror polling started (hourly)");
             }
 
-            // Initialize NTP for time synchronization
-            init_sntp();
+            // Start FTP server if SD card is mounted
+            if (sdcard_is_mounted()) {
+                if (ftp_server_start(FTP_DEFAULT_PORT) == ESP_OK) {
+                    ESP_LOGI(TAG, "FTP server started on port %d", FTP_DEFAULT_PORT);
+                }
+            }
+
+            // Start network services in background (geolocation, NTP)
+            // This avoids blocking the WiFi callback with slow HTTP requests
+            if (s_network_services_task == NULL) {
+                xTaskCreate(network_services_task, "net_services", 4096, NULL, 3, &s_network_services_task);
+            }
             break;
 
         case GEOGRAM_WIFI_STATUS_DISCONNECTED:
-            ESP_LOGW(TAG, "WiFi disconnected");
+            // Note: WiFi layer now auto-reconnects up to 10 times before calling this
+            ESP_LOGW(TAG, "WiFi disconnected (after retries exhausted)");
             s_wifi_connected = false;
             s_current_ip[0] = '\0';
             geogram_ui_update_wifi(UI_WIFI_STATUS_DISCONNECTED, NULL, NULL);
-            geogram_ui_show_status("WiFi Disconnected");
+            geogram_ui_show_status("WiFi Failed");
             geogram_ui_refresh(false);
 
-            // Stop Telnet and SSH servers
+            // Stop Telnet server (SSH disabled)
             telnet_server_stop();
-            geogram_ssh_stop();
+            // geogram_ssh_stop();
+
+            // Stop FTP server
+            ftp_server_stop();
+
+            // Stop update polling
+            updates_stop_polling();
+
+            // Fall back to AP mode if not already active
+            if (!s_ap_mode_active) {
+                ESP_LOGW(TAG, "WiFi connection failed, starting AP mode for configuration");
+                start_ap_mode();
+            }
             break;
 
         case GEOGRAM_WIFI_STATUS_AP_STARTED: {
             ESP_LOGI(TAG, "AP mode started");
+            s_ap_mode_active = true;
             geogram_wifi_get_ap_ip(s_current_ip);
 
             // Build AP SSID for display
@@ -288,12 +470,19 @@ static void sensor_task(void *pvParameter)
     shtc3_handle_t sensor = (shtc3_handle_t)pvParameter;
     shtc3_data_t data;
     uint32_t refresh_counter = 0;
+    bool first_reading = true;
 
     while (1) {
         if (shtc3_read(sensor, &data) == ESP_OK) {
             ESP_LOGI(TAG, "Temp: %.1f C, Humidity: %.1f %%",
                      data.temperature, data.humidity);
             geogram_ui_update_sensor(data.temperature, data.humidity);
+
+            // Trigger immediate display update on first reading
+            if (first_reading) {
+                first_reading = false;
+                geogram_ui_refresh(false);
+            }
         } else {
             ESP_LOGW(TAG, "Failed to read sensor");
         }
@@ -319,14 +508,20 @@ static void rtc_task(void *pvParameter)
     uint8_t last_minute = 255;
     uint32_t uptime_seconds = 0;
     uint32_t last_uptime_minute = 0;
+    bool first_reading = true;
 
     while (1) {
         if (pcf85063_get_datetime(rtc, &datetime) == ESP_OK) {
-            // Update time display only when minute changes
-            if (datetime.minute != last_minute) {
+            // Update time display on first read or when minute changes
+            if (first_reading || datetime.minute != last_minute) {
                 geogram_ui_update_time(datetime.hour, datetime.minute);
                 geogram_ui_update_date(datetime.year, datetime.month, datetime.day);
                 last_minute = datetime.minute;
+
+                if (first_reading) {
+                    first_reading = false;
+                    geogram_ui_refresh(false);
+                }
             }
         }
 
@@ -361,6 +556,26 @@ extern "C" void app_main(void)
 
     ESP_LOGI(TAG, "Board initialized successfully");
 
+#if BOARD_MODEL == MODEL_ESP32S3_EPAPER_1IN54
+    // Initialize tile cache if SD card is available
+    if (sdcard_is_mounted()) {
+        ret = tiles_init();
+        if (ret == ESP_OK) {
+            ESP_LOGI(TAG, "Tile cache initialized");
+        } else {
+            ESP_LOGW(TAG, "Tile cache init failed: %s", esp_err_to_name(ret));
+        }
+
+        // Initialize update mirror service
+        ret = updates_init();
+        if (ret == ESP_OK) {
+            ESP_LOGI(TAG, "Update mirror service initialized");
+        } else {
+            ESP_LOGW(TAG, "Update mirror init failed: %s", esp_err_to_name(ret));
+        }
+    }
+#endif
+
     // Initialize serial console
     ret = console_init();
     if (ret != ESP_OK) {
@@ -375,12 +590,27 @@ extern "C" void app_main(void)
     shtc3_handle_t env_sensor = model_get_env_sensor();
     pcf85063_handle_t rtc = model_get_rtc();
 
-    // Store RTC handle for NTP sync callback
+    // Store handles for callbacks
     s_rtc_handle = rtc;
+    s_display_handle = display;
 
     if (display == NULL) {
         ESP_LOGE(TAG, "Failed to get display handle");
         return;
+    }
+
+    // Initialize power button for shutdown on long press
+    button_config_t pwr_btn_config = {
+        .gpio = BTN_PIN_POWER,
+        .active_low = true,
+        .debounce_ms = 30,
+        .long_press_ms = 2000,  // 2 second long press for shutdown
+    };
+    ret = button_create(&pwr_btn_config, power_button_callback, NULL, &s_power_button);
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG, "Failed to create power button: %s", esp_err_to_name(ret));
+    } else {
+        ESP_LOGI(TAG, "Power button initialized (long press to shutdown)");
     }
 
     ESP_LOGI(TAG, "E-paper display: %dx%d",
@@ -441,6 +671,14 @@ extern "C" void app_main(void)
     // Main loop
     ESP_LOGI(TAG, "Entering main loop...");
     while (1) {
-        vTaskDelay(pdMS_TO_TICKS(1000));
+#if BOARD_MODEL == MODEL_ESP32S3_EPAPER_1IN54
+        // Check for shutdown request (from power button long press)
+        if (s_shutdown_requested) {
+            s_shutdown_requested = false;
+            device_shutdown();
+            // If we get here, deep sleep failed - reset the flag
+        }
+#endif
+        vTaskDelay(pdMS_TO_TICKS(100));  // Check more frequently for responsiveness
     }
 }

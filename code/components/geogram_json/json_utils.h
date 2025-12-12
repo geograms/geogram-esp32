@@ -34,6 +34,7 @@ void geo_json_add_string(geo_json_builder_t *builder, const char *key, const cha
 void geo_json_add_int(geo_json_builder_t *builder, const char *key, int value);
 void geo_json_add_uint(geo_json_builder_t *builder, const char *key, uint32_t value);
 void geo_json_add_int64(geo_json_builder_t *builder, const char *key, int64_t value);
+void geo_json_add_double(geo_json_builder_t *builder, const char *key, double value, int precision);
 void geo_json_add_bool(geo_json_builder_t *builder, const char *key, bool value);
 
 // Get result

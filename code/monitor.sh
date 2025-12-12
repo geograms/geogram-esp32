@@ -10,11 +10,15 @@ PORT="$1"
 
 # Auto-detect port if not specified
 if [ -z "$PORT" ]; then
-    if [ -e /dev/ttyACM0 ]; then
-        PORT="/dev/ttyACM0"
-    elif [ -e /dev/ttyUSB0 ]; then
-        PORT="/dev/ttyUSB0"
-    else
+    # Try to find any ttyACM device (ESP32-S3 built-in USB)
+    PORT=$(ls /dev/ttyACM* 2>/dev/null | head -1)
+
+    # Fall back to ttyUSB if no ttyACM found
+    if [ -z "$PORT" ]; then
+        PORT=$(ls /dev/ttyUSB* 2>/dev/null | head -1)
+    fi
+
+    if [ -z "$PORT" ]; then
         echo "Error: No serial port found. Please specify port as argument."
         echo "Usage: $0 [port]"
         exit 1

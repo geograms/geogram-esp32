@@ -7,6 +7,8 @@
 #include "nvs_flash.h"
 #include "nvs.h"
 #include "esp_log.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 
 static const char *TAG = "wifi_bsp";
 
@@ -18,6 +20,9 @@ static esp_netif_t *s_ap_netif = NULL;
 static uint32_t s_current_ip = 0;
 static bool s_initialized = false;
 static bool s_ap_active = false;
+static bool s_sta_connecting = false;  // True when STA mode is active and should reconnect
+static int s_retry_count = 0;
+static const int MAX_RETRY_COUNT = 10;  // Max retries before giving up
 
 static void wifi_event_handler(void *arg, esp_event_base_t event_base,
                                int32_t event_id, void *event_data)
@@ -27,25 +32,50 @@ static void wifi_event_handler(void *arg, esp_event_base_t event_base,
             case WIFI_EVENT_STA_START:
                 ESP_LOGI(TAG, "WiFi STA started, connecting...");
                 s_wifi_status = GEOGRAM_WIFI_STATUS_CONNECTING;
+                s_sta_connecting = true;
+                s_retry_count = 0;
                 esp_wifi_connect();
                 break;
 
             case WIFI_EVENT_STA_CONNECTED:
-                ESP_LOGI(TAG, "WiFi connected");
+                ESP_LOGI(TAG, "WiFi connected to AP");
                 s_wifi_status = GEOGRAM_WIFI_STATUS_CONNECTED;
+                s_retry_count = 0;  // Reset retry count on successful connection
                 if (s_sta_callback) {
                     s_sta_callback(GEOGRAM_WIFI_STATUS_CONNECTED, event_data);
                 }
                 break;
 
-            case WIFI_EVENT_STA_DISCONNECTED:
-                ESP_LOGW(TAG, "WiFi disconnected");
+            case WIFI_EVENT_STA_DISCONNECTED: {
+                wifi_event_sta_disconnected_t *event = (wifi_event_sta_disconnected_t *)event_data;
+                ESP_LOGW(TAG, "WiFi disconnected, reason: %d", event->reason);
                 s_wifi_status = GEOGRAM_WIFI_STATUS_DISCONNECTED;
                 s_current_ip = 0;
-                if (s_sta_callback) {
-                    s_sta_callback(GEOGRAM_WIFI_STATUS_DISCONNECTED, event_data);
+
+                // Auto-reconnect if we were in STA mode and haven't exceeded retries
+                if (s_sta_connecting && !s_ap_active) {
+                    s_retry_count++;
+                    if (s_retry_count <= MAX_RETRY_COUNT) {
+                        ESP_LOGI(TAG, "Reconnecting... (attempt %d/%d)", s_retry_count, MAX_RETRY_COUNT);
+                        // Small delay before reconnect to avoid rapid retries
+                        vTaskDelay(pdMS_TO_TICKS(1000));
+                        esp_wifi_connect();
+                    } else {
+                        ESP_LOGE(TAG, "Max retry attempts reached, giving up");
+                        s_sta_connecting = false;
+                        // Notify callback only after all retries exhausted
+                        if (s_sta_callback) {
+                            s_sta_callback(GEOGRAM_WIFI_STATUS_DISCONNECTED, event_data);
+                        }
+                    }
+                } else {
+                    // Not in STA mode or AP is active, just notify
+                    if (s_sta_callback) {
+                        s_sta_callback(GEOGRAM_WIFI_STATUS_DISCONNECTED, event_data);
+                    }
                 }
                 break;
+            }
 
             case WIFI_EVENT_AP_START:
                 ESP_LOGI(TAG, "WiFi AP started");
@@ -185,6 +215,7 @@ esp_err_t geogram_wifi_disconnect(void)
         return ESP_ERR_INVALID_STATE;
     }
 
+    s_sta_connecting = false;  // Don't auto-reconnect after explicit disconnect
     esp_err_t ret = esp_wifi_disconnect();
     s_wifi_status = GEOGRAM_WIFI_STATUS_DISCONNECTED;
     s_current_ip = 0;
@@ -261,6 +292,7 @@ esp_err_t geogram_wifi_stop_ap(void)
     esp_wifi_stop();
     s_ap_active = false;
     s_ap_callback = NULL;
+    s_sta_connecting = false;  // Reset STA state when stopping AP
 
     ESP_LOGI(TAG, "WiFi AP stopped");
     return ESP_OK;

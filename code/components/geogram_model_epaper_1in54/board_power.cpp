@@ -104,35 +104,40 @@ void board_power_backlight_timed(uint32_t duration_ms) {
 void board_power_deep_sleep(uint32_t wakeup_time_sec) {
     ESP_LOGI(TAG, "Entering deep sleep...");
 
-    // Disable all power domains for lowest power consumption
-    esp_sleep_pd_config(ESP_PD_DOMAIN_MAX, ESP_PD_OPTION_AUTO);
-
     // Disable all wake-up sources first
     esp_sleep_disable_wakeup_source(ESP_SLEEP_WAKEUP_ALL);
 
-    // Configure external wake-up pins using ESP-IDF 5.1 API
-    const uint64_t ext_wakeup_mask = (1ULL << WAKEUP_PIN_BOOT) |
-                                      (1ULL << WAKEUP_PIN_RTC) |
-                                      (1ULL << WAKEUP_PIN_POWER);
+    // Configure power button (GPIO18) as wake-up source
+    // Using ext1 wake-up which supports multiple GPIOs
+    const uint64_t ext_wakeup_mask = (1ULL << WAKEUP_PIN_POWER);
 
-    // Use ESP_EXT1_WAKEUP_ALL_LOW instead of ESP_EXT1_WAKEUP_ANY_LOW (changed in ESP-IDF 5.1)
-    esp_err_t ret = esp_sleep_enable_ext1_wakeup(ext_wakeup_mask, ESP_EXT1_WAKEUP_ALL_LOW);
+    // Wake up when the button is pressed (active low, so wake on low level)
+    // ESP_EXT1_WAKEUP_ANY_LOW was renamed to ESP_EXT1_WAKEUP_ALL_LOW in ESP-IDF 5.x
+    // but for a single pin they behave the same
+    esp_err_t ret = esp_sleep_enable_ext1_wakeup(ext_wakeup_mask, ESP_EXT1_WAKEUP_ANY_LOW);
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Failed to enable ext1 wakeup: %s", esp_err_to_name(ret));
+        // Try alternative method if ext1 fails
+        ret = esp_sleep_enable_ext0_wakeup(WAKEUP_PIN_POWER, 0);  // Wake on low level
+        if (ret != ESP_OK) {
+            ESP_LOGE(TAG, "Failed to enable ext0 wakeup: %s", esp_err_to_name(ret));
+        }
     }
 
-    // Configure RTC GPIO pullups
-    rtc_gpio_pulldown_dis(WAKEUP_PIN_RTC);
-    rtc_gpio_pullup_en(WAKEUP_PIN_RTC);
-
-    // Hold VBAT power state during sleep
-    rtc_gpio_hold_en(PWR_PIN_VBAT);
+    // Configure RTC GPIO for power button
+    rtc_gpio_pulldown_dis(WAKEUP_PIN_POWER);
+    rtc_gpio_pullup_en(WAKEUP_PIN_POWER);
 
     // Configure timer wake-up if specified
     if (wakeup_time_sec > 0) {
         esp_sleep_enable_timer_wakeup(wakeup_time_sec * 1000000ULL);
         ESP_LOGI(TAG, "Timer wake-up set for %lu seconds", wakeup_time_sec);
     }
+
+    ESP_LOGI(TAG, "Deep sleep configured - wake on power button press");
+
+    // Small delay to allow log output
+    vTaskDelay(pdMS_TO_TICKS(100));
 
     // Enter deep sleep
     esp_deep_sleep_start();

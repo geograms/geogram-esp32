@@ -107,6 +107,13 @@ void geo_json_add_int64(geo_json_builder_t *builder, const char *key, int64_t va
     geo_json_append(builder, buf);
 }
 
+void geo_json_add_double(geo_json_builder_t *builder, const char *key, double value, int precision) {
+    geo_json_add_comma(builder);
+    char buf[48];
+    snprintf(buf, sizeof(buf), "\"%s\":%.*f", key, precision, value);
+    geo_json_append(builder, buf);
+}
+
 void geo_json_add_bool(geo_json_builder_t *builder, const char *key, bool value) {
     geo_json_add_comma(builder);
     char buf[32];

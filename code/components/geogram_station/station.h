@@ -15,6 +15,8 @@ extern "C" {
 #define STATION_NICKNAME_LEN 32
 #define STATION_PLATFORM_LEN 16
 #define STATION_NAME_LEN 32
+#define STATION_LOCATION_LEN 64
+#define STATION_TIMEZONE_LEN 48
 
 // Connected WebSocket client
 typedef struct {
@@ -31,10 +33,15 @@ typedef struct {
 typedef struct {
     char callsign[STATION_CALLSIGN_LEN];    // Station callsign (X3 + npub derived)
     char name[STATION_NAME_LEN];            // Station name
+    char location[STATION_LOCATION_LEN];    // City, Country from geolocation
+    char timezone[STATION_TIMEZONE_LEN];    // IANA timezone string
+    double latitude;                        // GPS latitude from geolocation
+    double longitude;                       // GPS longitude from geolocation
     uint32_t start_time;                    // Boot timestamp (epoch seconds)
     station_client_t clients[STATION_MAX_CLIENTS];
     uint8_t client_count;                   // Active client count
     bool initialized;
+    bool has_location;                      // True if geolocation data is available
 } station_state_t;
 
 // Initialize station (generates NOSTR keys and X3 callsign)
@@ -51,6 +58,11 @@ uint32_t station_get_uptime(void);
 
 // Get connected client count
 uint8_t station_get_client_count(void);
+
+// Update station location from geolocation data
+void station_set_location(double latitude, double longitude,
+                          const char *city, const char *country,
+                          const char *timezone);
 
 // Add a new client connection (returns client index or -1 if full)
 int station_add_client(int fd);

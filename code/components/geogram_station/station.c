@@ -1,6 +1,7 @@
 #include "station.h"
 #include "json_utils.h"
 #include "nostr_keys.h"
+#include "tiles.h"
 #include <esp_log.h>
 #include <esp_wifi.h>
 #include <esp_timer.h>
@@ -64,6 +65,31 @@ uint32_t station_get_uptime(void) {
 
 uint8_t station_get_client_count(void) {
     return s_station.client_count;
+}
+
+void station_set_location(double latitude, double longitude,
+                          const char *city, const char *country,
+                          const char *timezone) {
+    s_station.latitude = latitude;
+    s_station.longitude = longitude;
+
+    if (city && country) {
+        snprintf(s_station.location, sizeof(s_station.location), "%s, %s", city, country);
+    } else if (city) {
+        strncpy(s_station.location, city, sizeof(s_station.location) - 1);
+    } else {
+        s_station.location[0] = '\0';
+    }
+
+    if (timezone) {
+        strncpy(s_station.timezone, timezone, sizeof(s_station.timezone) - 1);
+        s_station.timezone[sizeof(s_station.timezone) - 1] = '\0';
+    }
+
+    s_station.has_location = true;
+
+    ESP_LOGI(TAG, "Station location updated: %s (%.4f, %.4f) TZ: %s",
+             s_station.location, latitude, longitude, s_station.timezone);
 }
 
 int station_add_client(int fd) {
@@ -153,13 +179,45 @@ size_t station_build_status_json(char *buffer, size_t size) {
     geo_json_init(&builder, buffer, size);
 
     geo_json_object_start(&builder);
+
+    // Core identification (matching p2p.radio format)
+    geo_json_add_string(&builder, "service", "Geogram Station Server");
     geo_json_add_string(&builder, "name", s_station.name);
     geo_json_add_string(&builder, "version", STATION_VERSION);
     geo_json_add_string(&builder, "callsign", s_station.callsign);
+    geo_json_add_string(&builder, "description", "Geogram ESP32 Station");
     geo_json_add_string(&builder, "platform", "esp32");
+
+    // Station status
     geo_json_add_bool(&builder, "station_mode", true);
     geo_json_add_uint(&builder, "uptime", station_get_uptime());
     geo_json_add_int(&builder, "connected_devices", s_station.client_count);
+
+    // Location data
+    if (s_station.has_location) {
+        geo_json_add_string(&builder, "location", s_station.location);
+        geo_json_add_double(&builder, "latitude", s_station.latitude, 6);
+        geo_json_add_double(&builder, "longitude", s_station.longitude, 6);
+        geo_json_add_string(&builder, "timezone", s_station.timezone);
+    }
+
+    // Tile server (available when SD card is present)
+    bool tile_available = tiles_is_available();
+    geo_json_add_bool(&builder, "tile_server", tile_available);
+    geo_json_add_bool(&builder, "osm_fallback", !tile_available);
+    geo_json_add_uint(&builder, "cache_size", tile_available ? tiles_get_cache_count() : 0);
+    geo_json_add_uint(&builder, "cache_size_bytes", tile_available ? tiles_get_cache_size() : 0);
+
+    // Features
+    geo_json_add_bool(&builder, "enable_aprs", false);
+    geo_json_add_int(&builder, "chat_rooms", 0);
+
+    // Network ports
+    geo_json_add_int(&builder, "http_port", 80);
+    geo_json_add_bool(&builder, "https_enabled", false);
+    geo_json_add_int(&builder, "https_port", 0);
+    geo_json_add_bool(&builder, "https_running", false);
+
     geo_json_object_end(&builder);
 
     return geo_json_get_length(&builder);

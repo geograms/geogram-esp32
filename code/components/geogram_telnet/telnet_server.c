@@ -49,7 +49,9 @@ static char s_client_ip[16] = {0};
 // Output buffer for redirected printf
 static char s_output_buffer[TELNET_TX_BUFFER];
 static size_t s_output_len = 0;
-static bool s_redirecting = false;
+
+// File handle for stdout redirection
+static FILE *s_original_stdout = NULL;
 
 /**
  * @brief Send data to the telnet client
@@ -84,44 +86,58 @@ static int telnet_print(const char *str)
 }
 
 /**
- * @brief Custom write function for stdout redirection
+ * @brief Custom write function for stdout redirection to telnet
  */
-static ssize_t telnet_write(void *cookie, const char *buf, size_t size)
+static ssize_t telnet_stdout_write(void *cookie, const char *buf, size_t size)
 {
-    if (s_redirecting && s_client_sock >= 0) {
-        // Accumulate output in buffer
-        size_t to_copy = size;
-        if (s_output_len + to_copy > sizeof(s_output_buffer) - 1) {
-            to_copy = sizeof(s_output_buffer) - 1 - s_output_len;
-        }
-        if (to_copy > 0) {
-            memcpy(s_output_buffer + s_output_len, buf, to_copy);
-            s_output_len += to_copy;
+    if (s_client_sock >= 0 && size > 0) {
+        // Convert \n to \r\n for telnet and send directly
+        for (size_t i = 0; i < size; i++) {
+            if (buf[i] == '\n') {
+                send(s_client_sock, "\r\n", 2, 0);
+            } else {
+                send(s_client_sock, &buf[i], 1, 0);
+            }
         }
     }
     return size;
 }
 
 /**
- * @brief Flush output buffer to telnet client
+ * @brief Redirect stdout to telnet client
  */
-static void telnet_flush_output(void)
+static void telnet_redirect_stdout(void)
 {
-    if (s_output_len > 0 && s_client_sock >= 0) {
-        s_output_buffer[s_output_len] = '\0';
+    // Save original stdout
+    s_original_stdout = stdout;
 
-        // Convert \n to \r\n for telnet
-        char converted[TELNET_TX_BUFFER * 2];
-        size_t j = 0;
-        for (size_t i = 0; i < s_output_len && j < sizeof(converted) - 2; i++) {
-            if (s_output_buffer[i] == '\n' && (i == 0 || s_output_buffer[i-1] != '\r')) {
-                converted[j++] = '\r';
-            }
-            converted[j++] = s_output_buffer[i];
+    // Create custom FILE stream that writes to telnet
+    static cookie_io_functions_t telnet_io = {
+        .write = telnet_stdout_write,
+        .read = NULL,
+        .seek = NULL,
+        .close = NULL
+    };
+
+    stdout = fopencookie(NULL, "w", telnet_io);
+    if (stdout != NULL) {
+        setvbuf(stdout, NULL, _IONBF, 0);  // Unbuffered
+    } else {
+        stdout = s_original_stdout;  // Restore on failure
+    }
+}
+
+/**
+ * @brief Restore stdout to original
+ */
+static void telnet_restore_stdout(void)
+{
+    if (s_original_stdout != NULL) {
+        if (stdout != s_original_stdout) {
+            fclose(stdout);
         }
-
-        telnet_send(converted, j);
-        s_output_len = 0;
+        stdout = s_original_stdout;
+        s_original_stdout = NULL;
     }
 }
 
@@ -238,15 +254,16 @@ static void telnet_handle_client(void)
                         goto disconnect;
                     }
 
-                    // Execute command using esp_console
-                    s_redirecting = true;
-                    s_output_len = 0;
+                    // Redirect stdout to telnet client
+                    telnet_redirect_stdout();
 
+                    // Execute command using esp_console
                     int ret;
                     esp_err_t err = esp_console_run(line, &ret);
 
-                    s_redirecting = false;
-                    telnet_flush_output();
+                    // Restore stdout
+                    fflush(stdout);
+                    telnet_restore_stdout();
 
                     if (err == ESP_ERR_NOT_FOUND) {
                         telnet_print("Unknown command: ");

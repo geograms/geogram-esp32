@@ -56,3 +56,15 @@ CONFIG_FATFS_LFN_HEAP=y
 # SSH server authentication
 CONFIG_EXAMPLE_ALLOW_PASSWORD_AUTH=y
 CONFIG_EXAMPLE_ALLOW_PUBLICKEY_AUTH=n
+
+# mbedTLS threading (required for SSH server libssh)
+CONFIG_MBEDTLS_THREADING_C=y
+CONFIG_MBEDTLS_THREADING_ALT=n
+CONFIG_MBEDTLS_THREADING_PTHREAD=y
+
+# Allow insecure TLS connections (needed for tile downloads without cert verification)
+CONFIG_ESP_TLS_INSECURE=y
+CONFIG_ESP_TLS_SKIP_SERVER_CERT_VERIFY=y
+
+# LWIP settings (for SSH server compatibility)
+CONFIG_LWIP_NETIF_API=y

@@ -12,6 +12,8 @@
 #include "nvs.h"
 #include "station.h"
 #include "ws_server.h"
+#include "tiles.h"
+#include "updates.h"
 
 static const char *TAG = "http_server";
 
@@ -269,10 +271,12 @@ esp_err_t http_server_start_ex(wifi_config_callback_t callback, bool enable_stat
 
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.lru_purge_enable = true;
+    config.stack_size = 8192;  // Increase stack for tile downloads with TLS
 
     // Increase max URI handlers if station API is enabled
     if (enable_station_api) {
-        config.max_uri_handlers = 10;
+        config.max_uri_handlers = 12;
+        config.uri_match_fn = httpd_uri_match_wildcard;  // Enable wildcard matching for /tiles/*
     }
 
     ESP_LOGI(TAG, "Starting HTTP server on port %d (station_api=%d)", config.server_port, enable_station_api);
@@ -296,6 +300,18 @@ esp_err_t http_server_start_ex(wifi_config_callback_t callback, bool enable_stat
         ret = ws_server_register(s_server);
         if (ret != ESP_OK) {
             ESP_LOGW(TAG, "Failed to register WebSocket handler: %s", esp_err_to_name(ret));
+        }
+
+        // Register tile server handler if SD card is available
+        ret = tiles_register_http_handler(s_server);
+        if (ret != ESP_OK) {
+            ESP_LOGI(TAG, "Tile server not available (no SD card)");
+        }
+
+        // Register update mirror handlers if available
+        ret = updates_register_http_handlers(s_server);
+        if (ret != ESP_OK) {
+            ESP_LOGI(TAG, "Update mirror not available (no SD card)");
         }
 
         ESP_LOGI(TAG, "Station API endpoints registered");
