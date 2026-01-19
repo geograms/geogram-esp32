@@ -220,7 +220,7 @@ static const char *LANDING_PAGE_HTML_PREFIX =
     "<head>"
     "<meta charset=\"UTF-8\">"
     "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no\">"
-    "<title>Geogram</title>"
+    "<title>geogram</title>"
     "<style>"
     ":root{--accent:#ffa86a;--bg:#101010;--text:#f0f0f0;--border:rgba(255,240,224,.125);--muted:#888}"
     "*{box-sizing:border-box;margin:0;padding:0}"

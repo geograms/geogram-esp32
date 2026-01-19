@@ -80,6 +80,33 @@ static const char *TAG = "geogram";
 #ifdef CONFIG_GEOGRAM_MESH_ENABLED
 static bool s_mesh_mode = false;
 static bool s_mesh_connected = false;
+static bool s_mesh_services_started = false;
+
+static void start_mesh_services(void)
+{
+    if (s_mesh_services_started) {
+        return;
+    }
+
+    const char *ap_ssid = "geogram";
+    geogram_mesh_start_external_ap(ap_ssid, "", CONFIG_GEOGRAM_MESH_EXTERNAL_AP_MAX_CONN);
+    ESP_LOGI(TAG, "External AP: %s (open)", ap_ssid);
+
+    uint32_t ap_ip = 0;
+    if (geogram_mesh_get_external_ap_ip_addr(&ap_ip) == ESP_OK) {
+        dns_server_start(ap_ip);
+    }
+
+    station_init();
+    http_server_start_ex(NULL, true);
+    ESP_LOGI(TAG, "Station API started on mesh node");
+
+    if (telnet_server_start(TELNET_DEFAULT_PORT) == ESP_OK) {
+        ESP_LOGI(TAG, "Telnet server started on port %d", TELNET_DEFAULT_PORT);
+    }
+
+    s_mesh_services_started = true;
+}
 
 /**
  * @brief Mesh event callback
@@ -99,32 +126,11 @@ static void mesh_event_cb(geogram_mesh_event_t event, void *event_data)
             led_set_state(LED_STATE_OK);
 #endif
 
-            // Start external AP for phone connections
-            // SSID: geogram-{callsign}, Password: geogram
-            {
-                char ap_ssid[32];
-                const char *callsign = nostr_keys_get_callsign();
-                if (callsign && strlen(callsign) > 0) {
-                    snprintf(ap_ssid, sizeof(ap_ssid), "geogram-%s", callsign);
-                } else {
-                    snprintf(ap_ssid, sizeof(ap_ssid), "geogram-mesh");
-                }
-                geogram_mesh_start_external_ap(ap_ssid, "geogram", CONFIG_GEOGRAM_MESH_EXTERNAL_AP_MAX_CONN);
-                ESP_LOGI(TAG, "External AP: %s (password: geogram)", ap_ssid);
-            }
+            start_mesh_services();
 
             // Enable IP bridging
             geogram_mesh_enable_bridge();
 
-            // Initialize Station API
-            station_init();
-            http_server_start_ex(NULL, true);
-            ESP_LOGI(TAG, "Station API started on mesh node");
-
-            // Start Telnet server
-            if (telnet_server_start(TELNET_DEFAULT_PORT) == ESP_OK) {
-                ESP_LOGI(TAG, "Telnet server started on port %d", TELNET_DEFAULT_PORT);
-            }
             break;
 
         case GEOGRAM_MESH_EVENT_DISCONNECTED:
@@ -142,6 +148,7 @@ static void mesh_event_cb(geogram_mesh_event_t event, void *event_data)
             http_server_stop();
             geogram_mesh_disable_bridge();
             geogram_mesh_stop_external_ap();
+            s_mesh_services_started = false;
             break;
 
         case GEOGRAM_MESH_EVENT_ROOT_CHANGED:
@@ -202,6 +209,7 @@ static void start_mesh_mode(void)
 
     s_mesh_mode = true;
     ESP_LOGI(TAG, "Mesh mode started, scanning for network...");
+    // External AP will be started when mesh connects (in mesh_event_cb)
 }
 #endif  // CONFIG_GEOGRAM_MESH_ENABLED
 
@@ -833,7 +841,10 @@ extern "C" void app_main(void)
 
 #endif  // BOARD_MODEL == MODEL_ESP32S3_EPAPER_1IN54
 
-#if BOARD_MODEL == MODEL_ESP32C3_MINI
+#if BOARD_MODEL == MODEL_ESP32C3_MINI && !defined(CONFIG_GEOGRAM_MESH_ENABLED)
+    // Standalone WiFi AP mode for ESP32C3 when mesh is disabled
+    // When mesh is enabled, mesh_bsp handles all WiFi/netif initialization
+
     // Initialize NOSTR keys (needed for AP SSID with callsign)
     ret = nostr_keys_init();
     if (ret != ESP_OK) {
@@ -888,7 +899,7 @@ extern "C" void app_main(void)
 #endif
         }
     }
-#endif  // BOARD_MODEL == MODEL_ESP32C3_MINI
+#endif  // BOARD_MODEL == MODEL_ESP32C3_MINI && !CONFIG_GEOGRAM_MESH_ENABLED
 
     // Main loop
     ESP_LOGI(TAG, "Entering main loop...");

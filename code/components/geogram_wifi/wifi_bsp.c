@@ -140,17 +140,37 @@ esp_err_t geogram_wifi_init(void)
     }
 
     // Initialize TCP/IP stack
-    ESP_ERROR_CHECK(esp_netif_init());
+    ret = esp_netif_init();
+    if (ret != ESP_OK && ret != ESP_ERR_INVALID_STATE) {
+        ESP_LOGE(TAG, "esp_netif_init failed: %s", esp_err_to_name(ret));
+        return ret;
+    }
 
     // Create default event loop
-    ESP_ERROR_CHECK(esp_event_loop_create_default());
+    ret = esp_event_loop_create_default();
+    if (ret != ESP_OK && ret != ESP_ERR_INVALID_STATE) {
+        ESP_LOGE(TAG, "esp_event_loop_create_default failed: %s", esp_err_to_name(ret));
+        return ret;
+    }
 
-    // Create default WiFi station
-    s_sta_netif = esp_netif_create_default_wifi_sta();
+    // Create default WiFi station (or reuse if already created by mesh)
+    s_sta_netif = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
+    if (!s_sta_netif) {
+        s_sta_netif = esp_netif_create_default_wifi_sta();
+    } else {
+        ESP_LOGI(TAG, "Reusing existing WIFI_STA_DEF netif");
+    }
 
-    // Initialize WiFi
+    // Initialize WiFi (may already be initialized by mesh)
     wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
-    ESP_ERROR_CHECK(esp_wifi_init(&cfg));
+    ret = esp_wifi_init(&cfg);
+    if (ret != ESP_OK && ret != ESP_ERR_WIFI_INIT_STATE) {
+        ESP_LOGE(TAG, "esp_wifi_init failed: %s", esp_err_to_name(ret));
+        return ret;
+    }
+    if (ret == ESP_ERR_WIFI_INIT_STATE) {
+        ESP_LOGI(TAG, "WiFi already initialized, reusing");
+    }
 
     // Register event handlers
     ESP_ERROR_CHECK(esp_event_handler_instance_register(WIFI_EVENT, ESP_EVENT_ANY_ID,
@@ -258,9 +278,15 @@ esp_err_t geogram_wifi_start_ap(const geogram_wifi_ap_config_t *config)
         return ESP_ERR_INVALID_ARG;
     }
 
-    // Create AP netif if not already created
+    // Reuse existing AP netif if already created (e.g., by mesh), otherwise create new
     if (s_ap_netif == NULL) {
-        s_ap_netif = esp_netif_create_default_wifi_ap();
+        s_ap_netif = esp_netif_get_handle_from_ifkey("WIFI_AP_DEF");
+        if (s_ap_netif) {
+            ESP_LOGI(TAG, "Reusing existing WIFI_AP_DEF netif");
+        } else {
+            s_ap_netif = esp_netif_create_default_wifi_ap();
+            ESP_LOGI(TAG, "Created new WIFI_AP_DEF netif");
+        }
     }
 
     s_ap_callback = config->callback;

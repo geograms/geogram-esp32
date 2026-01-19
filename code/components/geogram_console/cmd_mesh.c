@@ -576,12 +576,14 @@ static int cmd_mesh_debug(int argc, char **argv)
 
     if (mesh_debug_args.on->count > 0) {
         s_debug_enabled = true;
-        esp_log_level_set("mesh", ESP_LOG_DEBUG);
+        esp_log_level_set("mesh", ESP_LOG_DEBUG);      // Internal ESP-MESH
+        esp_log_level_set("mesh_bsp", ESP_LOG_DEBUG);  // Our mesh component
         esp_log_level_set("mesh_bridge", ESP_LOG_DEBUG);
         printf("Mesh debug logging ENABLED\n");
     } else if (mesh_debug_args.off->count > 0) {
         s_debug_enabled = false;
-        esp_log_level_set("mesh", ESP_LOG_INFO);
+        esp_log_level_set("mesh", ESP_LOG_WARN);       // Suppress internal scanning logs
+        esp_log_level_set("mesh_bsp", ESP_LOG_INFO);   // Our mesh component
         esp_log_level_set("mesh_bridge", ESP_LOG_INFO);
         printf("Mesh debug logging DISABLED\n");
     } else {
