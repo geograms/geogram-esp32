@@ -66,7 +66,7 @@ This document describes the Wi-Fi AP chat page, the HTTP API, and how messages a
 - Landscape mode: all messages aligned left.
 - Timestamps are rendered as `YYYY-MM-DD HH:MM` using browser time.
 - The footer shows: `Connected to station <CALLSIGN>` when known.
-- The hamburger menu includes:\n+  - “Connect Nostr extension,” which prompts the extension to sign a short connect event and derives the npub/callsign from the signed pubkey.\n+  - “Reset local data,” which clears local keys, clears the message list, and skips previously stored history when the next poll runs.
+- The hamburger menu includes “Reset local data,” which clears local keys, clears the message list, and skips previously stored history when the next poll runs.
 
 ## Logging
 
