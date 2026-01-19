@@ -278,6 +278,7 @@ esp_err_t mesh_chat_add_local_message_with_timestamp(const char *callsign,
         s_callback(&local_msg);
     }
 
+    ESP_LOGI(TAG, "[CHAT RX] %s: %s", local_msg.callsign, local_msg.text);
     return ESP_OK;
 }
 

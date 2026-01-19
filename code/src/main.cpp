@@ -29,6 +29,9 @@
 // IP geolocation for timezone
 #include "geoloc.h"
 
+// Plain log helper (no ANSI)
+#include "geogram_log_plain.h"
+
 // Mesh networking (optional, enabled via CONFIG_GEOGRAM_MESH_ENABLED)
 #ifdef CONFIG_GEOGRAM_MESH_ENABLED
 #include "mesh_bsp.h"
@@ -86,6 +89,9 @@ static void mesh_event_cb(geogram_mesh_event_t event, void *event_data)
     switch (event) {
         case GEOGRAM_MESH_EVENT_CONNECTED:
             ESP_LOGI(TAG, "Mesh connected, layer: %d", geogram_mesh_get_layer());
+            ESP_LOGI(TAG, "Mesh nodes: %zu, role: %s",
+                     geogram_mesh_get_node_count(),
+                     geogram_mesh_is_root() ? "root" : "child");
             s_mesh_connected = true;
 
 #if BOARD_MODEL == MODEL_ESP32C3_MINI && HAS_LED
@@ -123,6 +129,7 @@ static void mesh_event_cb(geogram_mesh_event_t event, void *event_data)
 
         case GEOGRAM_MESH_EVENT_DISCONNECTED:
             ESP_LOGW(TAG, "Mesh disconnected");
+            ESP_LOGI(TAG, "Mesh nodes now: %zu", geogram_mesh_get_node_count());
             s_mesh_connected = false;
 
 #if BOARD_MODEL == MODEL_ESP32C3_MINI && HAS_LED
@@ -727,6 +734,17 @@ extern "C" void app_main(void)
     } else {
         ESP_LOGI(TAG, "Serial console initialized");
     }
+
+#ifdef CONFIG_GEOGRAM_MESH_ENABLED
+    geogram_log_plain(TAG, "Mesh support: ENABLED");
+#else
+    geogram_log_plain(TAG, "Mesh support: DISABLED in this build");
+#endif
+
+#if defined(CONFIG_GEOGRAM_MESH_ENABLED) && BOARD_MODEL == MODEL_ESP32C3_MINI
+    geogram_log_plain(TAG, "Starting mesh mode by default");
+    start_mesh_mode();
+#endif
 
 #if BOARD_MODEL == MODEL_ESP32S3_EPAPER_1IN54
     // Get hardware handles

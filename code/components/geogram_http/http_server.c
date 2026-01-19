@@ -245,7 +245,7 @@ static const char *LANDING_PAGE_HTML_PREFIX =
     ".msg .file{color:var(--muted);font-size:12px}"
     ".file-action{margin-top:6px;background:transparent;border:1px solid var(--border);color:var(--text);padding:6px 8px;border-radius:4px;cursor:pointer;font-size:12px}"
     ".msg.local{align-self:flex-end;text-align:right}"
-    ".msg.remote{align-self:flex-start}"
+    ".msg.remote{align-self:flex-start;text-align:left}"
     "@media (orientation:landscape){"
     ".msg.local,.msg.remote{align-self:flex-start;text-align:left}"
     "}"

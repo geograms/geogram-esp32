@@ -14,11 +14,10 @@
 ⣿⣿⣿⣿⣿⣿⣿⠃⣸⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣇⠘⣿⣿⣿⣿⣿⣿⣿
 ⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿
 
-Offline-First Communication
 
-· · · ·   ───   · ── ·   ·
+ Offline-First Communication
+  · · · ·   ───   · ── ·   ·
    APRS  ·  BLE  ·  NOSTR
-    ···· ─── ·──· ·
     
      ┌─┐        ┌─┐ 
      ||| ┌────┐ |||
