@@ -19,6 +19,9 @@ typedef enum {
     WS_MSG_HELLO,           // Client hello with ID
     WS_MSG_FILE_REQUEST,    // Request file by SHA1
     WS_MSG_FILE_AVAILABLE,  // Announce file availability
+    WS_MSG_FILE_FETCH,      // Request file transfer from a peer
+    WS_MSG_FILE_CHUNK,      // File chunk transfer
+    WS_MSG_FILE_COMPLETE,   // File transfer complete
     WS_MSG_RTC_OFFER,       // WebRTC offer
     WS_MSG_RTC_ANSWER,      // WebRTC answer
     WS_MSG_RTC_ICE,         // WebRTC ICE candidate

@@ -121,6 +121,22 @@ esp_err_t mesh_chat_add_local_message_with_timestamp(const char *callsign,
                                                      uint32_t timestamp);
 
 /**
+ * @brief Add a local-only file metadata message with a custom callsign
+ * @param callsign Sender callsign (optional)
+ * @param text Optional caption text
+ * @param sha1 SHA1 hash bytes (20 bytes)
+ * @param size File size in bytes
+ * @param filename File name (optional)
+ * @param mime_type MIME type (optional)
+ */
+esp_err_t mesh_chat_add_local_file_message(const char *callsign,
+                                           const char *text,
+                                           const uint8_t *sha1,
+                                           uint32_t size,
+                                           const char *filename,
+                                           const char *mime_type);
+
+/**
  * @brief Send a file message to all mesh nodes
  * @param text Optional caption/description text
  * @param sha1 SHA1 hash of file content (20 bytes)

@@ -155,6 +155,9 @@ ws_message_type_t ws_parse_message_type(const char *data, size_t len)
     if (strcmp(type, "hello") == 0) return WS_MSG_HELLO;
     if (strcmp(type, "file_request") == 0) return WS_MSG_FILE_REQUEST;
     if (strcmp(type, "file_available") == 0) return WS_MSG_FILE_AVAILABLE;
+    if (strcmp(type, "file_fetch") == 0) return WS_MSG_FILE_FETCH;
+    if (strcmp(type, "file_chunk") == 0) return WS_MSG_FILE_CHUNK;
+    if (strcmp(type, "file_complete") == 0) return WS_MSG_FILE_COMPLETE;
     if (strcmp(type, "rtc_offer") == 0) return WS_MSG_RTC_OFFER;
     if (strcmp(type, "rtc_answer") == 0) return WS_MSG_RTC_ANSWER;
     if (strcmp(type, "rtc_ice") == 0) return WS_MSG_RTC_ICE;
@@ -350,13 +353,21 @@ static void handle_ws_message(httpd_handle_t server, int fd, const char *data, s
         case WS_MSG_HELLO:
             // Client identifies itself
             if (json_get_string(data, "id", value, sizeof(value))) {
+                ESP_LOGI(TAG, "WS hello: id=%s fd=%d", value, fd);
                 set_client_id(fd, value);
             }
             break;
 
         case WS_MSG_FILE_REQUEST:
             // Broadcast file request to all local clients
-            ESP_LOGI(TAG, "File request broadcast");
+            {
+                char sha1[64] = {0};
+                char from_id[16] = {0};
+                json_get_string(data, "sha1", sha1, sizeof(sha1));
+                json_get_string(data, "from", from_id, sizeof(from_id));
+                ESP_LOGI(TAG, "File request: sha1=%s from=%s", sha1[0] ? sha1 : "unknown",
+                         from_id[0] ? from_id : "unknown");
+            }
             broadcast_except(server, fd, data, len);
 
 #ifdef CONFIG_GEOGRAM_MESH_ENABLED
@@ -374,8 +385,38 @@ static void handle_ws_message(httpd_handle_t server, int fd, const char *data, s
 
         case WS_MSG_FILE_AVAILABLE:
             // Broadcast file availability to all clients
-            ESP_LOGI(TAG, "File available broadcast");
+            {
+                char sha1[64] = {0};
+                char from_id[16] = {0};
+                json_get_string(data, "sha1", sha1, sizeof(sha1));
+                json_get_string(data, "from", from_id, sizeof(from_id));
+                ESP_LOGI(TAG, "File available: sha1=%s from=%s", sha1[0] ? sha1 : "unknown",
+                         from_id[0] ? from_id : "unknown");
+            }
             broadcast_except(server, fd, data, len);
+            break;
+
+        case WS_MSG_FILE_FETCH:
+        case WS_MSG_FILE_CHUNK:
+        case WS_MSG_FILE_COMPLETE:
+            if (json_get_string(data, "to", value, sizeof(value))) {
+                char sha1[64] = {0};
+                char from_id[16] = {0};
+                char seq[16] = {0};
+                json_get_string(data, "sha1", sha1, sizeof(sha1));
+                json_get_string(data, "from", from_id, sizeof(from_id));
+                if (msg_type == WS_MSG_FILE_CHUNK) {
+                    json_get_string(data, "seq", seq, sizeof(seq));
+                }
+                ESP_LOGI(TAG, "File relay: type=%s sha1=%s from=%s to=%s seq=%s",
+                         msg_type == WS_MSG_FILE_FETCH ? "fetch" :
+                         msg_type == WS_MSG_FILE_CHUNK ? "chunk" : "complete",
+                         sha1[0] ? sha1 : "unknown",
+                         from_id[0] ? from_id : "unknown",
+                         value,
+                         msg_type == WS_MSG_FILE_CHUNK ? (seq[0] ? seq : "0") : "-");
+                ws_send_to_client(server, value, data, len);
+            }
             break;
 
         case WS_MSG_RTC_OFFER:

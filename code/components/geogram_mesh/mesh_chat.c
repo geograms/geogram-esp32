@@ -281,6 +281,67 @@ esp_err_t mesh_chat_add_local_message_with_timestamp(const char *callsign,
     return ESP_OK;
 }
 
+esp_err_t mesh_chat_add_local_file_message(const char *callsign,
+                                           const char *text,
+                                           const uint8_t *sha1,
+                                           uint32_t size,
+                                           const char *filename,
+                                           const char *mime_type)
+{
+    if (!s_initialized) {
+        ESP_LOGE(TAG, "Chat not initialized");
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    if (!sha1 || size == 0) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    size_t text_len = text ? strlen(text) : 0;
+    if (text_len > MESH_CHAT_MAX_MESSAGE_LEN) {
+        text_len = MESH_CHAT_MAX_MESSAGE_LEN;
+    }
+
+    const char *sender = callsign && strlen(callsign) > 0 ? callsign : "GUEST";
+
+    mesh_chat_message_t local_msg = {
+        .timestamp = get_timestamp(),
+        .is_local = true,
+        .msg_type = MESH_CHAT_MSG_FILE
+    };
+    memset(&local_msg.file, 0, sizeof(local_msg.file));
+
+    xSemaphoreTake(s_mutex, portMAX_DELAY);
+    local_msg.id = s_next_msg_id++;
+    xSemaphoreGive(s_mutex);
+
+    strncpy(local_msg.callsign, sender, MESH_CHAT_MAX_CALLSIGN_LEN - 1);
+    if (text && text_len > 0) {
+        memcpy(local_msg.text, text, text_len);
+        local_msg.text[text_len] = '\0';
+    } else {
+        local_msg.text[0] = '\0';
+    }
+    memcpy(local_msg.sender_mac, s_local_mac, 6);
+
+    memcpy(local_msg.file.sha1, sha1, 20);
+    local_msg.file.size = size;
+    if (filename) {
+        strncpy(local_msg.file.filename, filename, MESH_CHAT_MAX_FILENAME_LEN - 1);
+    }
+    if (mime_type) {
+        strncpy(local_msg.file.mime_type, mime_type, MESH_CHAT_MAX_MIME_LEN - 1);
+    }
+
+    add_message_to_history(&local_msg);
+
+    if (s_callback) {
+        s_callback(&local_msg);
+    }
+
+    return ESP_OK;
+}
+
 // ============================================================================
 // Send File Message
 // ============================================================================

@@ -75,3 +75,61 @@ The ESP32 logs key and chat actions to the serial console, including:
 - Client key status and npub (from `/api/chat/client`).
 - Chat message posts.
 - Signed event receipts (size and client timestamp when provided).
+
+## Attachments (metadata-only)
+
+Goal: allow users to attach files while the station stores only metadata (no binary). Files are shared client-to-client.
+
+### Metadata message
+
+Attachment messages are a special chat message type that contain:
+
+- `sha1` (20-byte hash, hex in UI)
+- `size` (bytes)
+- `mime_type` (e.g., `image/png`)
+- `filename` (optional)
+- `text` (caption/description)
+
+These metadata messages are stored in the same 100-message ring buffer and expire like any other message.
+
+### Client flow (browser)
+
+1) User selects a file (max 20MB).  
+2) Browser computes SHA1 and collects metadata.  
+3) Browser sends metadata to the station, which stores a file-type message.  
+4) Browser retains the binary locally (memory/IndexedDB) for later sharing.  
+
+### Station/API plan
+
+- HTTP endpoint: `POST /api/chat/send-file` (metadata only).
+- Server calls a file-message helper (local-only or mesh-broadcast) to insert metadata into history.
+- No binary is stored on the ESP32.
+
+### Discovery + transfer
+
+WebSocket signaling already exists in `ws_server`:
+
+- `file_request`: broadcast “who has sha1?”
+- `file_available`: response from a client who has the file
+- `file_fetch`: request a peer to start transfer
+- `file_chunk`: chunked data relay
+- `file_complete`: transfer finished metadata
+- `rtc_offer/answer/ice`: optional (unused in this flow)
+
+The chat UI will:
+
+- Show a “Request file” action for file messages.
+- Send a `file_request` with `sha1` and client ID.
+- Listen for `file_available` and initiate transfer.
+
+### Transfer
+
+- WebSocket relay by client ID (`file_fetch`, `file_chunk`, `file_complete`).
+- Sender streams chunks to the recipient via the station as a relay.
+- Station still does not store binaries; it only forwards frames.
+
+### Limits and lifecycle
+
+- File size limit: 20MB per file.
+- Metadata messages expire after 100 total messages.
+- Binary data lives only on clients and can be evicted by the browser.

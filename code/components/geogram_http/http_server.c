@@ -242,16 +242,19 @@ static const char *LANDING_PAGE_HTML_PREFIX =
     ".msg .author{color:var(--accent);font-weight:bold}"
     ".msg .time{color:var(--muted);margin-left:6px}"
     ".msg .text{color:var(--text);word-wrap:break-word}"
+    ".msg .file{color:var(--muted);font-size:12px}"
+    ".file-action{margin-top:6px;background:transparent;border:1px solid var(--border);color:var(--text);padding:6px 8px;border-radius:4px;cursor:pointer;font-size:12px}"
     ".msg.local{align-self:flex-end;text-align:right}"
     ".msg.remote{align-self:flex-start}"
     "@media (orientation:landscape){"
     ".msg.local,.msg.remote{align-self:flex-start;text-align:left}"
     "}"
     ".msg.system{align-self:center;color:var(--muted);font-size:12px;font-style:italic}"
-    ".input-area{border-top:1px solid var(--border);padding:12px;display:flex;gap:8px}"
+    ".input-area{border-top:1px solid var(--border);padding:12px;display:flex;gap:8px;align-items:center}"
     ".input-area input{flex:1;background:transparent;border:1px solid var(--border);border-radius:4px;padding:10px;color:var(--text);font-size:16px;outline:none}"
     ".input-area input:focus{border-color:var(--accent)}"
     ".input-area button{background:var(--accent);color:var(--bg);border:none;border-radius:4px;padding:10px 16px;font-weight:bold;cursor:pointer}"
+    ".attach-btn{background:transparent;color:var(--text);border:1px dashed var(--border);padding:10px 12px;font-weight:bold;border-radius:4px}"
     ".status-bar{border-top:1px solid var(--border);padding:6px 12px;font-size:10px;color:var(--muted);display:flex;justify-content:space-between}"
     "</style>"
     "</head>"
@@ -268,6 +271,8 @@ static const char *LANDING_PAGE_HTML_PREFIX =
     "<div class=\"chat\">"
     "<div class=\"messages\" id=\"messages\"></div>"
     "<div class=\"input-area\">"
+    "<button id=\"attach\" class=\"attach-btn\" title=\"Attach file\">+</button>"
+    "<input type=\"file\" id=\"file\" style=\"display:none\">"
     "<input type=\"text\" id=\"input\" placeholder=\"Type a message...\" maxlength=\"200\">"
     "<button id=\"send\">SEND</button>"
     "</div>"
@@ -284,9 +289,21 @@ static const char *LANDING_PAGE_HTML_SUFFIX =
     "<script>"
     "let lastId=0,maxLen=200;"
     "let skipHistory=false;"
+    "const MAX_FILE_BYTES=20*1024*1024;"
+    "const CHUNK_SIZE=1500;"
+    "const clientIdKey='geogram_client_id';"
+    "const clientId=localStorage.getItem(clientIdKey)||(()=>{const id='c'+Math.random().toString(36).slice(2,10);localStorage.setItem(clientIdKey,id);return id;})();"
+    "let ws=null;"
+    "const fileStore=new Map();"
+    "let pendingFile=null;"
+    "const pendingRequests=new Set();"
+    "const downloads=new Map();"
     "const $=id=>document.getElementById(id);"
     "function esc(s){return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}"
     "function fmtTime(ts){const d=new Date(ts*1000);const iso=d.toISOString();return iso.slice(0,10)+' '+iso.slice(11,16);}"
+    "function base64FromBytes(bytes){let bin='';for(let i=0;i<bytes.length;i++){bin+=String.fromCharCode(bytes[i]);}return btoa(bin);}"
+    "function bytesFromBase64(b64){const bin=atob(b64);const out=new Uint8Array(bin.length);for(let i=0;i<bin.length;i++){out[i]=bin.charCodeAt(i);}return out;}"
+    "async function sha1Hex(file){const buf=await file.arrayBuffer();const hash=await crypto.subtle.digest('SHA-1',buf);return bytesToHex(new Uint8Array(hash));}"
     "const storageKey='geogram_nostr_keys';"
     "let clientKeys=null;"
     "function bytesToHex(bytes){return Array.from(bytes,b=>b.toString(16).padStart(2,'0')).join('');}"
@@ -342,10 +359,25 @@ static const char *LANDING_PAGE_HTML_SUFFIX =
     "$('status').textContent='Connected';"
     "}else{$('status').textContent='No keys';}"
     "}"
+    "function formatSize(bytes){if(!bytes&&bytes!==0)return'';const units=['B','KB','MB','GB'];let n=bytes;let i=0;while(n>=1024&&i<units.length-1){n/=1024;i++;}return n.toFixed(i?1:0)+' '+units[i];}"
     "function render(m){"
     "const div=document.createElement('div');"
     "div.className='msg '+(m.local?'local':'remote');"
-    "div.innerHTML='<div class=\"meta\"><span class=\"author\">'+esc(m.from)+'</span><span class=\"time\">'+fmtTime(m.ts)+'</span></div><div class=\"text\">'+esc(m.text)+'</div>';"
+    "let body='';"
+    "if(m.type==='file'&&m.file){"
+    "const sha1=m.file.sha1||'';"
+    "const name=m.file.name||'file';"
+    "const size=formatSize(m.file.size);"
+    "const mime=m.file.mime||'';"
+    "const label=[name,size,mime].filter(Boolean).join(' • ');"
+    "const has=fileStore.has(sha1);"
+    "const action=has?'Download':'Request file';"
+    "body='<div class=\"text\">'+(m.text?esc(m.text)+'<br>':'')+'<span class=\"file\">'+esc(label)+'</span></div>';"
+    "body+='<div><button class=\"file-action\" data-sha1=\"'+esc(sha1)+'\">'+action+'</button></div>';"
+    "}else{"
+    "body='<div class=\"text\">'+esc(m.text)+'</div>';"
+    "}"
+    "div.innerHTML='<div class=\"meta\"><span class=\"author\">'+esc(m.from)+'</span><span class=\"time\">'+fmtTime(m.ts)+'</span></div>'+body;"
     "return div;}"
     "async function signLocalEvent(content,createdAt,tags){"
     "const event={kind:1,content:content,created_at:createdAt,tags:tags||[],pubkey:clientKeys.pubkey};"
@@ -375,10 +407,16 @@ static const char *LANDING_PAGE_HTML_SUFFIX =
     "}catch(e){$('status').textContent='Offline';}}"
     "async function send(){"
     "const inp=$('input'),txt=inp.value.trim();"
-    "if(!txt)return;"
+    "if(!txt&&!pendingFile)return;"
     "if(!clientKeys){await initKeys();updateStatus();}"
     "$('send').disabled=true;"
     "try{"
+    "if(pendingFile){"
+    "const pf=pendingFile;"
+    "const body='text='+encodeURIComponent(txt||'')+'&callsign='+(clientKeys?encodeURIComponent(clientKeys.callsign):'')+'&sha1='+encodeURIComponent(pf.sha1)+'&size='+pf.size+'&filename='+encodeURIComponent(pf.name||'')+'&mime='+encodeURIComponent(pf.mime||'');"
+    "const r=await fetch('/api/chat/send-file',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:body});"
+    "if(r.ok){fileStore.set(pf.sha1,{file:pf.file,name:pf.name,size:pf.size,mime:pf.mime});pendingFile=null;$('file').value='';inp.value='';await load();}"
+    "}else{"
     "const clientTs=Math.floor(Date.now()/1000);"
     "const iso=new Date(clientTs*1000).toISOString();"
     "const tags=[[\"client_time\",iso]];"
@@ -395,14 +433,104 @@ static const char *LANDING_PAGE_HTML_SUFFIX =
     "}"
     "const r=await fetch('/api/chat/send',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:body});"
     "if(r.ok){inp.value='';await load();}"
+    "}"
     "}catch(e){}"
     "$('send').disabled=false;inp.focus();}"
     "$('send').onclick=send;"
     "$('input').onkeypress=e=>{if(e.key==='Enter')send();};"
+    "$('attach').onclick=()=>{$('file').click();};"
+    "$('file').onchange=async e=>{const f=e.target.files&&e.target.files[0];if(!f)return;"
+    "if(f.size>MAX_FILE_BYTES){$('status').textContent='File too large (max 20MB)';$('file').value='';return;}"
+    "const sha1=await sha1Hex(f);"
+    "pendingFile={file:f,sha1:sha1,name:f.name,size:f.size,mime:f.type||''};"
+    "$('status').textContent='Ready to send '+f.name;};"
+    "$('messages').onclick=e=>{const btn=e.target.closest('.file-action');if(!btn)return;"
+    "const sha1=btn.getAttribute('data-sha1');"
+    "if(fileStore.has(sha1)){"
+    "const entry=fileStore.get(sha1);"
+    "const blob=entry.blob||entry.file;"
+    "const url=URL.createObjectURL(blob);"
+    "const a=document.createElement('a');a.href=url;a.download=entry.name||'file';a.click();"
+    "setTimeout(()=>URL.revokeObjectURL(url),2000);"
+    "}else{"
+    "pendingRequests.add(sha1);"
+    "wsSend({type:'file_request',sha1:sha1,from:clientId});"
+    "$('status').textContent='Requesting file...';"
+    "}};"
     "async function reportClient(info){"
     "try{const body='callsign='+encodeURIComponent(info.callsign||'')+'&npub='+encodeURIComponent(info.npub||'')+'&mode='+(info.mode||'')+'&error='+(info.error||'');"
     "await fetch('/api/chat/client',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:body});"
     "}catch(e){}"
+    "}"
+    "function wsSend(obj){if(!ws||ws.readyState!==1)return;ws.send(JSON.stringify(obj));}"
+    "async function sendFileChunks(entry,toId,sha1){"
+    "const blob=entry.blob||entry.file;"
+    "const size=entry.size||blob.size;"
+    "const name=entry.name||'file';"
+    "const mime=entry.mime||blob.type||'';"
+    "let offset=0,seq=0;"
+    "while(offset<size){"
+    "const slice=blob.slice(offset,offset+CHUNK_SIZE);"
+    "const buf=new Uint8Array(await slice.arrayBuffer());"
+    "wsSend({type:'file_chunk',to:toId,from:clientId,sha1:sha1,seq:seq,data:base64FromBytes(buf)});"
+    "offset+=CHUNK_SIZE;seq++;"
+    "}"
+    "wsSend({type:'file_complete',to:toId,from:clientId,sha1:sha1,name:name,size:size,mime:mime,chunks:seq});"
+    "}"
+    "function handleWsMessage(msg){"
+    "if(!msg||!msg.type)return;"
+    "if(msg.type==='file_request'){"
+    "const sha1=msg.sha1||'';"
+    "if(fileStore.has(sha1)){"
+    "const entry=fileStore.get(sha1);"
+    "wsSend({type:'file_available',sha1:sha1,from:clientId,name:entry.name||'file',size:entry.size||0,mime:entry.mime||''});"
+    "}"
+    "return;"
+    "}"
+    "if(msg.type==='file_available'){"
+    "const sha1=msg.sha1||'';"
+    "if(pendingRequests.has(sha1)&&msg.from){"
+    "wsSend({type:'file_fetch',sha1:sha1,from:clientId,to:msg.from});"
+    "pendingRequests.delete(sha1);"
+    "}"
+    "return;"
+    "}"
+    "if(msg.type==='file_fetch'){"
+    "if(msg.to!==clientId)return;"
+    "const sha1=msg.sha1||'';"
+    "if(fileStore.has(sha1)&&msg.from){"
+    "sendFileChunks(fileStore.get(sha1),msg.from,sha1);"
+    "}"
+    "return;"
+    "}"
+    "if(msg.type==='file_chunk'){"
+    "if(msg.to!==clientId)return;"
+    "const sha1=msg.sha1||'';"
+    "const entry=downloads.get(sha1)||{chunks:{},count:0};"
+    "entry.chunks[msg.seq]=bytesFromBase64(msg.data||'');"
+    "entry.count++;"
+    "downloads.set(sha1,entry);"
+    "return;"
+    "}"
+    "if(msg.type==='file_complete'){"
+    "if(msg.to!==clientId)return;"
+    "const sha1=msg.sha1||'';"
+    "const entry=downloads.get(sha1);"
+    "if(!entry)return;"
+    "const chunkList=[];"
+    "for(let i=0;i<msg.chunks;i++){if(entry.chunks[i])chunkList.push(entry.chunks[i]);}"
+    "const blob=new Blob(chunkList,{type:msg.mime||''});"
+    "fileStore.set(sha1,{blob:blob,name:msg.name||'file',size:msg.size||blob.size,mime:msg.mime||''});"
+    "downloads.delete(sha1);"
+    "$('status').textContent='File received';"
+    "return;"
+    "}"
+    "}"
+    "function initWebSocket(){"
+    "ws=new WebSocket('ws://'+location.host+'/ws');"
+    "ws.onopen=()=>{wsSend({type:'hello',id:clientId});};"
+    "ws.onmessage=e=>{try{const msg=JSON.parse(e.data);handleWsMessage(msg);}catch(_){}};"
+    "ws.onclose=()=>{setTimeout(initWebSocket,2000);};"
     "}"
     "function clearLocalData(){"
     "localStorage.removeItem(storageKey);"
@@ -422,7 +550,7 @@ static const char *LANDING_PAGE_HTML_SUFFIX =
     "});"
     "$('resetBtn').onclick=()=>{panel.classList.remove('open');clearLocalData();};"
     "}"
-    "(async()=>{try{await initKeys();updateStatus();await reportClient(clientKeys);await load();setInterval(load,3000);}catch(e){"
+    "(async()=>{try{await initKeys();updateStatus();await reportClient(clientKeys);initWebSocket();await load();setInterval(load,3000);}catch(e){"
     "const msg=(e&&e.message)?e.message:'keygen failed';$('status').textContent='Keygen failed';await reportClient({error:msg});}})();"
     "initMenu();"
     "if(window.visualViewport){"
@@ -503,6 +631,23 @@ static bool extract_form_value(const char *data, const char *key, char *value, s
     value[len] = '\0';
     url_decode(value);
 
+    return true;
+}
+
+static bool parse_sha1_hex(const char *hex, uint8_t *out)
+{
+    if (!hex || strlen(hex) != 40) {
+        return false;
+    }
+    for (int i = 0; i < 20; i++) {
+        char byte_str[3] = {hex[i * 2], hex[i * 2 + 1], 0};
+        char *endptr = NULL;
+        long val = strtol(byte_str, &endptr, 16);
+        if (!endptr || *endptr != '\0' || val < 0 || val > 255) {
+            return false;
+        }
+        out[i] = (uint8_t)val;
+    }
     return true;
 }
 
@@ -772,6 +917,87 @@ static esp_err_t api_chat_send_post_handler(httpd_req_t *req)
 }
 
 /**
+ * @brief Handler for /api/chat/send-file - file metadata message
+ */
+static esp_err_t api_chat_send_file_post_handler(httpd_req_t *req)
+{
+    char *content = malloc(2048);
+    if (!content) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Out of memory");
+        return ESP_FAIL;
+    }
+
+    int total_len = req->content_len;
+    if (total_len >= 2048) {
+        free(content);
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Content too long");
+        return ESP_FAIL;
+    }
+
+    int ret = httpd_req_recv(req, content, total_len);
+    if (ret <= 0) {
+        free(content);
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Failed to receive data");
+        return ESP_FAIL;
+    }
+    content[total_len] = '\0';
+
+    char callsign[MESH_CHAT_MAX_CALLSIGN_LEN + 1] = {0};
+    char text[MESH_CHAT_MAX_MESSAGE_LEN + 1] = {0};
+    char sha1_hex[64] = {0};
+    char size_buf[32] = {0};
+    char filename[MESH_CHAT_MAX_FILENAME_LEN + 1] = {0};
+    char mime[MESH_CHAT_MAX_MIME_LEN + 1] = {0};
+
+    extract_form_value(content, "callsign", callsign, sizeof(callsign));
+    extract_form_value(content, "text", text, sizeof(text));
+    if (!extract_form_value(content, "sha1", sha1_hex, sizeof(sha1_hex)) ||
+        !extract_form_value(content, "size", size_buf, sizeof(size_buf))) {
+        free(content);
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Missing sha1 or size");
+        return ESP_FAIL;
+    }
+    extract_form_value(content, "filename", filename, sizeof(filename));
+    extract_form_value(content, "mime", mime, sizeof(mime));
+
+    free(content);
+
+    uint8_t sha1[20];
+    if (!parse_sha1_hex(sha1_hex, sha1)) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid sha1");
+        return ESP_FAIL;
+    }
+
+    uint32_t size = (uint32_t)strtoul(size_buf, NULL, 10);
+    if (size == 0 || size > (20 * 1024 * 1024)) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid size");
+        return ESP_FAIL;
+    }
+
+    esp_err_t err = mesh_chat_add_local_file_message(
+        callsign[0] ? callsign : NULL,
+        text[0] ? text : NULL,
+        sha1,
+        size,
+        filename[0] ? filename : NULL,
+        mime[0] ? mime : NULL);
+    if (err != ESP_OK) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Failed to send");
+        return ESP_FAIL;
+    }
+
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
+    httpd_resp_send(req, "{\"ok\":true}", 11);
+
+    ESP_LOGI(TAG, "CHAT file %s (%lu bytes) sha1=%s",
+             filename[0] ? filename : "unnamed",
+             (unsigned long)size,
+             sha1_hex);
+    return ESP_OK;
+}
+
+/**
  * @brief Handler for /api/chat/client - client key status/info
  */
 static esp_err_t api_chat_client_post_handler(httpd_req_t *req)
@@ -834,6 +1060,13 @@ static const httpd_uri_t uri_api_chat_send = {
     .uri = "/api/chat/send",
     .method = HTTP_POST,
     .handler = api_chat_send_post_handler,
+    .user_ctx = NULL
+};
+
+static const httpd_uri_t uri_api_chat_send_file = {
+    .uri = "/api/chat/send-file",
+    .method = HTTP_POST,
+    .handler = api_chat_send_file_post_handler,
     .user_ctx = NULL
 };
 
@@ -949,6 +1182,7 @@ esp_err_t http_server_start_ex(wifi_config_callback_t callback, bool enable_stat
 #ifdef CHAT_ENABLED
         httpd_register_uri_handler(s_server, &uri_api_chat_messages);
         httpd_register_uri_handler(s_server, &uri_api_chat_send);
+        httpd_register_uri_handler(s_server, &uri_api_chat_send_file);
         httpd_register_uri_handler(s_server, &uri_api_chat_client);
 
         // Initialize chat system
