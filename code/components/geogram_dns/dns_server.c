@@ -39,7 +39,6 @@ typedef struct __attribute__((packed)) {
 #define DNS_MAX_PACKET  512
 #define DNS_TASK_STACK  4096
 #define DNS_TASK_PRIO   5
-#define DNS_NAME_MAX    128
 
 static int s_socket = -1;
 static TaskHandle_t s_task = NULL;
@@ -65,41 +64,6 @@ static int dns_skip_name(const uint8_t *data, int offset, int len)
 }
 
 /**
- * @brief Read a DNS name into a dot-separated string
- */
-static bool dns_read_name(const uint8_t *data, int offset, int len, char *out, size_t out_len)
-{
-    size_t out_pos = 0;
-    while (offset < len) {
-        uint8_t label_len = data[offset++];
-        if (label_len == 0) {
-            break;
-        }
-        if ((label_len & 0xC0) == 0xC0) {
-            return false;
-        }
-        if (offset + label_len > len || out_pos + label_len + 1 >= out_len) {
-            return false;
-        }
-        if (out_pos > 0) {
-            out[out_pos++] = '.';
-        }
-        for (uint8_t i = 0; i < label_len; i++) {
-            char c = (char)data[offset++];
-            if (c >= 'A' && c <= 'Z') {
-                c = (char)(c - 'A' + 'a');
-            }
-            out[out_pos++] = c;
-        }
-    }
-    if (out_pos >= out_len) {
-        return false;
-    }
-    out[out_pos] = '\0';
-    return true;
-}
-
-/**
  * @brief Build DNS response packet
  */
 static int dns_build_response(const uint8_t *query, int query_len, uint8_t *response, uint32_t ip)
@@ -120,12 +84,6 @@ static int dns_build_response(const uint8_t *query, int query_len, uint8_t *resp
 
     // Skip past header and question to find where to add answer
     int offset = sizeof(dns_header_t);
-    char qname[DNS_NAME_MAX] = {0};
-    if (dns_read_name(query, offset, query_len, qname, sizeof(qname))) {
-        if (strcmp(qname, "geogram.local") == 0) {
-            ESP_LOGI(TAG, "DNS query for %s", qname);
-        }
-    }
 
     // Skip question name
     offset = dns_skip_name(query, offset, query_len);
