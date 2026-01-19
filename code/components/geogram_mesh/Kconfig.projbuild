@@ -1,0 +1,81 @@
+menu "Geogram Mesh Networking"
+
+    config GEOGRAM_MESH_ENABLED
+        bool "Enable ESP-MESH support"
+        default n
+        depends on IDF_TARGET_ESP32 || IDF_TARGET_ESP32S2 || IDF_TARGET_ESP32S3 || IDF_TARGET_ESP32C3
+        help
+            Enable ESP-MESH protocol for multi-node mesh networks.
+            When enabled, devices can form a self-organizing mesh network
+            and bridge IP traffic between phones connected to different nodes.
+            ESP32-C3 is supported with reduced memory limits (see Kconfig options).
+
+    config GEOGRAM_MESH_CHANNEL
+        int "Mesh WiFi Channel"
+        default 1
+        range 1 13
+        depends on GEOGRAM_MESH_ENABLED
+        help
+            WiFi channel for mesh network. All nodes must use the same channel.
+            Avoid channels used by nearby WiFi networks for best performance.
+
+    config GEOGRAM_MESH_MAX_LAYER
+        int "Maximum mesh tree depth"
+        default 6
+        range 2 25
+        depends on GEOGRAM_MESH_ENABLED
+        help
+            Maximum depth of the mesh tree topology. Root node is layer 1.
+            Larger values allow more nodes but increase latency.
+            Use 3 for ESP32-C3 to conserve memory.
+
+    config GEOGRAM_MESH_ROUTE_TABLE_SIZE
+        int "Route table size"
+        default 50
+        range 10 300
+        depends on GEOGRAM_MESH_ENABLED
+        help
+            Maximum number of nodes in the routing table.
+            Use 20 for ESP32-C3 to conserve memory.
+
+    config GEOGRAM_MESH_EXTERNAL_AP_MAX_CONN
+        int "Max phone connections per node"
+        default 4
+        range 1 10
+        depends on GEOGRAM_MESH_ENABLED
+        help
+            Maximum number of phones that can connect to each node's SoftAP.
+            Use 2 for ESP32-C3 to conserve memory.
+
+    config GEOGRAM_MESH_AP_AUTHMODE
+        int "External AP authentication mode"
+        default 0
+        range 0 4
+        depends on GEOGRAM_MESH_ENABLED
+        help
+            Authentication mode for the external SoftAP:
+            0 = Open (no password)
+            1 = WEP
+            2 = WPA_PSK
+            3 = WPA2_PSK
+            4 = WPA_WPA2_PSK
+
+    config GEOGRAM_MESH_BRIDGE_BUFFER_SIZE
+        int "Bridge packet buffer size"
+        default 1500
+        range 576 2048
+        depends on GEOGRAM_MESH_ENABLED
+        help
+            Maximum size of IP packets that can be bridged.
+            Standard Ethernet MTU is 1500.
+
+    config GEOGRAM_MESH_BRIDGE_QUEUE_SIZE
+        int "Bridge packet queue size"
+        default 8
+        range 4 32
+        depends on GEOGRAM_MESH_ENABLED
+        help
+            Number of packets that can be queued for bridging.
+            Larger values improve throughput but use more memory.
+
+endmenu

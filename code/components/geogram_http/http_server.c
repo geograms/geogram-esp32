@@ -12,8 +12,20 @@
 #include "nvs.h"
 #include "station.h"
 #include "ws_server.h"
+#include "app_config.h"
+
+#if BOARD_MODEL == MODEL_ESP32S3_EPAPER_1IN54
 #include "tiles.h"
 #include "updates.h"
+#endif
+
+// Chat support (in-memory history; mesh broadcast optional)
+#define CHAT_ENABLED 1
+#include "mesh_chat.h"
+
+#ifdef CONFIG_GEOGRAM_MESH_ENABLED
+#include "mesh_bsp.h"
+#endif
 
 static const char *TAG = "http_server";
 
@@ -36,9 +48,6 @@ static const char *CONFIG_PAGE_HTML =
     "input[type=text],input[type=password]{width:100%;padding:12px;border:1px solid #ddd;border-radius:4px;box-sizing:border-box;font-size:16px;}"
     "input[type=submit]{width:100%;padding:14px;background:#2196F3;color:white;border:none;border-radius:4px;cursor:pointer;font-size:16px;margin-top:20px;}"
     "input[type=submit]:hover{background:#1976D2;}"
-    ".status{padding:10px;margin-top:15px;border-radius:4px;text-align:center;}"
-    ".success{background:#e8f5e9;color:#2e7d32;}"
-    ".error{background:#ffebee;color:#c62828;}"
     "</style>"
     "</head>"
     "<body>"
@@ -52,6 +61,98 @@ static const char *CONFIG_PAGE_HTML =
     "<input type=\"submit\" value=\"Connect\">"
     "</form>"
     "</div>"
+    "</body>"
+    "</html>";
+
+// Landing page with chat - Terminimal theme
+static const char *LANDING_PAGE_HTML =
+    "<!DOCTYPE html>"
+    "<html>"
+    "<head>"
+    "<meta charset=\"UTF-8\">"
+    "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no\">"
+    "<title>Geogram</title>"
+    "<style>"
+    ":root{--accent:#ffa86a;--bg:#101010;--text:#f0f0f0;--border:rgba(255,240,224,.125);--muted:#888}"
+    "*{box-sizing:border-box;margin:0;padding:0}"
+    "html,body{height:100%;overflow:hidden}"
+    "body{font-family:-apple-system,BlinkMacSystemFont,sans-serif;background:var(--bg);color:var(--text);font-size:14px;display:flex;flex-direction:column}"
+    ".header{border-bottom:1px solid var(--border);padding:12px;display:flex;align-items:center;gap:12px}"
+    ".header .logo{font-size:18px;font-weight:bold;color:var(--accent)}"
+    ".header nav{display:flex;gap:12px;margin-left:auto}"
+    ".header nav a{color:var(--text);text-decoration:none;font-size:12px}"
+    ".chat{flex:1;display:flex;flex-direction:column;min-height:0}"
+    ".messages{flex:1;overflow-y:auto;padding:12px;display:flex;flex-direction:column;gap:8px}"
+    ".msg{max-width:85%}"
+    ".msg .meta{font-size:11px;margin-bottom:2px}"
+    ".msg .author{color:var(--accent);font-weight:bold}"
+    ".msg .time{color:var(--muted);margin-left:6px}"
+    ".msg .text{color:var(--text);word-wrap:break-word}"
+    ".msg.local{align-self:flex-end;text-align:right}"
+    ".msg.remote{align-self:flex-start}"
+    ".msg.system{align-self:center;color:var(--muted);font-size:12px;font-style:italic}"
+    ".input-area{border-top:1px solid var(--border);padding:12px;display:flex;gap:8px}"
+    ".input-area input{flex:1;background:transparent;border:1px solid var(--border);border-radius:4px;padding:10px;color:var(--text);font-size:16px;outline:none}"
+    ".input-area input:focus{border-color:var(--accent)}"
+    ".input-area button{background:var(--accent);color:var(--bg);border:none;border-radius:4px;padding:10px 16px;font-weight:bold;cursor:pointer}"
+    ".status-bar{border-top:1px solid var(--border);padding:6px 12px;font-size:10px;color:var(--muted);display:flex;justify-content:space-between}"
+    "</style>"
+    "</head>"
+    "<body>"
+    "<div class=\"header\">"
+    "<span class=\"logo\">> geogram</span>"
+    "</div>"
+    "<div class=\"chat\">"
+    "<div class=\"messages\" id=\"messages\"></div>"
+    "<div class=\"input-area\">"
+    "<input type=\"text\" id=\"input\" placeholder=\"Type a message...\" maxlength=\"200\">"
+    "<button id=\"send\">SEND</button>"
+    "</div>"
+    "</div>"
+    "<div class=\"status-bar\">"
+    "<span id=\"status\">Connecting...</span>"
+    "<span id=\"count\"></span>"
+    "</div>"
+    "<script>"
+    "let lastId=0,maxLen=200;"
+    "const $=id=>document.getElementById(id);"
+    "function esc(s){return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}"
+    "function fmtTime(ts){const d=new Date(ts*1000);return d.toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'});}"
+    "function render(m){"
+    "const div=document.createElement('div');"
+    "div.className='msg '+(m.local?'local':'remote');"
+    "div.innerHTML='<div class=\"meta\"><span class=\"author\">'+esc(m.from)+'</span><span class=\"time\">'+fmtTime(m.ts)+'</span></div><div class=\"text\">'+esc(m.text)+'</div>';"
+    "return div;}"
+    "async function load(){"
+    "try{"
+    "const r=await fetch('/api/chat/messages?since='+lastId);"
+    "if(!r.ok)return;"
+    "const d=await r.json();"
+    "$('status').textContent=d.my_callsign||'Offgrid';"
+    "if(d.max_len)maxLen=d.max_len;"
+    "$('input').maxLength=maxLen;"
+    "if(d.messages&&d.messages.length){"
+    "d.messages.forEach(m=>{if(m.id>lastId){$('messages').appendChild(render(m));lastId=m.id;}});"
+    "$('messages').scrollTop=$('messages').scrollHeight;}"
+    "if(d.latest_id>lastId)lastId=d.latest_id;"
+    "$('count').textContent=d.count?d.count+' msgs':'';"
+    "}catch(e){$('status').textContent='Offline';}}"
+    "async function send(){"
+    "const inp=$('input'),txt=inp.value.trim();"
+    "if(!txt)return;"
+    "$('send').disabled=true;"
+    "try{"
+    "const r=await fetch('/api/chat/send',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'text='+encodeURIComponent(txt)});"
+    "if(r.ok){inp.value='';await load();}"
+    "}catch(e){}"
+    "$('send').disabled=false;inp.focus();}"
+    "$('send').onclick=send;"
+    "$('input').onkeypress=e=>{if(e.key==='Enter')send();};"
+    "load();setInterval(load,3000);"
+    "if(window.visualViewport){"
+    "const vv=window.visualViewport;"
+    "vv.onresize=()=>{document.body.style.height=vv.height+'px';$('messages').scrollTop=$('messages').scrollHeight;};}"
+    "</script>"
     "</body>"
     "</html>";
 
@@ -130,9 +231,29 @@ static bool extract_form_value(const char *data, const char *key, char *value, s
 }
 
 /**
- * @brief Handler for root page (WiFi config form)
+ * @brief Handler for captive portal detection - return 204 so devices stay connected
+ */
+static esp_err_t captive_portal_handler(httpd_req_t *req)
+{
+    httpd_resp_set_status(req, "204 No Content");
+    httpd_resp_send(req, NULL, 0);
+    return ESP_OK;
+}
+
+/**
+ * @brief Handler for root page - serves landing page with chat
  */
 static esp_err_t root_get_handler(httpd_req_t *req)
+{
+    httpd_resp_set_type(req, "text/html");
+    httpd_resp_send(req, LANDING_PAGE_HTML, strlen(LANDING_PAGE_HTML));
+    return ESP_OK;
+}
+
+/**
+ * @brief Handler for setup page (WiFi config form)
+ */
+static esp_err_t setup_get_handler(httpd_req_t *req)
 {
     httpd_resp_set_type(req, "text/html");
     httpd_resp_send(req, CONFIG_PAGE_HTML, strlen(CONFIG_PAGE_HTML));
@@ -147,7 +268,6 @@ static esp_err_t connect_post_handler(httpd_req_t *req)
     char content[256];
     int ret;
 
-    // Read POST data
     int total_len = req->content_len;
     if (total_len >= sizeof(content)) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Content too long");
@@ -163,7 +283,6 @@ static esp_err_t connect_post_handler(httpd_req_t *req)
 
     ESP_LOGI(TAG, "Received config: %s", content);
 
-    // Extract SSID and password
     char ssid[33] = {0};
     char password[65] = {0};
 
@@ -176,7 +295,6 @@ static esp_err_t connect_post_handler(httpd_req_t *req)
 
     ESP_LOGI(TAG, "WiFi config received - SSID: %s", ssid);
 
-    // Save to NVS
     nvs_handle_t nvs;
     esp_err_t err = nvs_open("wifi_config", NVS_READWRITE, &nvs);
     if (err == ESP_OK) {
@@ -187,11 +305,9 @@ static esp_err_t connect_post_handler(httpd_req_t *req)
         ESP_LOGI(TAG, "WiFi credentials saved to NVS");
     }
 
-    // Send success page
     httpd_resp_set_type(req, "text/html");
     httpd_resp_send(req, SUCCESS_PAGE_HTML, strlen(SUCCESS_PAGE_HTML));
 
-    // Invoke callback
     if (s_config_callback != NULL) {
         s_config_callback(ssid, password);
     }
@@ -226,10 +342,146 @@ static esp_err_t api_status_get_handler(httpd_req_t *req)
     return ESP_OK;
 }
 
+// ============================================================================
+// Chat API Endpoints
+// ============================================================================
+
+#ifdef CHAT_ENABLED
+
+/**
+ * @brief Handler for /api/chat/messages - get chat history
+ */
+static esp_err_t api_chat_messages_get_handler(httpd_req_t *req)
+{
+    char query[64] = {0};
+    uint32_t since_id = 0;
+
+    if (httpd_req_get_url_query_str(req, query, sizeof(query)) == ESP_OK) {
+        char param[16];
+        if (httpd_query_key_value(query, "since", param, sizeof(param)) == ESP_OK) {
+            since_id = (uint32_t)atoi(param);
+        }
+    }
+
+    // Get callsign (with null check)
+    const char *callsign = station_get_callsign();
+    if (!callsign) callsign = "NOCALL";
+
+    // Build response
+    const size_t buffer_size = 32768;
+    char *buffer = malloc(buffer_size);
+    if (!buffer) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Out of memory");
+        return ESP_FAIL;
+    }
+
+    // mesh_chat_build_json returns {"messages":[...]} so we build around it
+    int offset = snprintf(buffer, buffer_size,
+        "{\"my_callsign\":\"%s\",\"max_len\":%d,\"count\":%d,\"latest_id\":%lu,",
+        callsign, MESH_CHAT_MAX_MESSAGE_LEN, (int)mesh_chat_get_count(),
+        (unsigned long)mesh_chat_get_latest_id());
+
+    // mesh_chat_build_json writes {"messages":[...]} - we skip the opening { and include rest
+    char *json_buf = buffer + offset;
+    size_t json_len = mesh_chat_build_json(json_buf, buffer_size - offset - 1, since_id);
+
+    // Skip the opening '{' from mesh_chat_build_json output and keep the rest
+    if (json_len > 0 && json_buf[0] == '{') {
+        memmove(json_buf, json_buf + 1, json_len);
+        offset += json_len - 1;  // -1 because we removed '{'
+    } else {
+        // Fallback: just add empty messages
+        offset += snprintf(buffer + offset, buffer_size - offset, "\"messages\":[]}");
+    }
+
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
+    httpd_resp_send(req, buffer, offset);
+
+    free(buffer);
+    return ESP_OK;
+}
+
+/**
+ * @brief Handler for /api/chat/send - send a chat message
+ */
+static esp_err_t api_chat_send_post_handler(httpd_req_t *req)
+{
+    char *content = malloc(512);
+    if (!content) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Out of memory");
+        return ESP_FAIL;
+    }
+
+    int total_len = req->content_len;
+    if (total_len >= 512) {
+        free(content);
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Content too long");
+        return ESP_FAIL;
+    }
+
+    int ret = httpd_req_recv(req, content, total_len);
+    if (ret <= 0) {
+        free(content);
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Failed to receive data");
+        return ESP_FAIL;
+    }
+    content[total_len] = '\0';
+
+    // Extract text from form data
+    char text[MESH_CHAT_MAX_MESSAGE_LEN + 1] = {0};
+    if (!extract_form_value(content, "text", text, sizeof(text)) || strlen(text) == 0) {
+        free(content);
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Missing text");
+        return ESP_FAIL;
+    }
+
+    free(content);
+
+    // Send message
+    esp_err_t err = mesh_chat_send(text);
+    if (err != ESP_OK) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Failed to send");
+        return ESP_FAIL;
+    }
+
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
+    httpd_resp_send(req, "{\"ok\":true}", 11);
+    return ESP_OK;
+}
+
+static const httpd_uri_t uri_api_chat_messages = {
+    .uri = "/api/chat/messages",
+    .method = HTTP_GET,
+    .handler = api_chat_messages_get_handler,
+    .user_ctx = NULL
+};
+
+static const httpd_uri_t uri_api_chat_send = {
+    .uri = "/api/chat/send",
+    .method = HTTP_POST,
+    .handler = api_chat_send_post_handler,
+    .user_ctx = NULL
+};
+
+#endif // CHAT_ENABLED
+
+// ============================================================================
+// URI definitions
+// ============================================================================
+
 static const httpd_uri_t uri_root = {
     .uri = "/",
     .method = HTTP_GET,
     .handler = root_get_handler,
+    .user_ctx = NULL
+};
+
+static const httpd_uri_t uri_setup = {
+    .uri = "/setup",
+    .method = HTTP_GET,
+    .handler = setup_get_handler,
     .user_ctx = NULL
 };
 
@@ -254,6 +506,25 @@ static const httpd_uri_t uri_api_status = {
     .user_ctx = NULL
 };
 
+// Captive portal detection URIs
+static const httpd_uri_t uri_generate_204 = {
+    .uri = "/generate_204",
+    .method = HTTP_GET,
+    .handler = captive_portal_handler,
+    .user_ctx = NULL
+};
+
+static const httpd_uri_t uri_hotspot_detect = {
+    .uri = "/hotspot-detect.html",
+    .method = HTTP_GET,
+    .handler = captive_portal_handler,
+    .user_ctx = NULL
+};
+
+// ============================================================================
+// Server start/stop
+// ============================================================================
+
 esp_err_t http_server_start(wifi_config_callback_t callback)
 {
     return http_server_start_ex(callback, false);
@@ -271,13 +542,8 @@ esp_err_t http_server_start_ex(wifi_config_callback_t callback, bool enable_stat
 
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.lru_purge_enable = true;
-    config.stack_size = 8192;  // Increase stack for tile downloads with TLS
-
-    // Increase max URI handlers if station API is enabled
-    if (enable_station_api) {
-        config.max_uri_handlers = 12;
-        config.uri_match_fn = httpd_uri_match_wildcard;  // Enable wildcard matching for /tiles/*
-    }
+    config.stack_size = 8192;
+    config.max_uri_handlers = 16;
 
     ESP_LOGI(TAG, "Starting HTTP server on port %d (station_api=%d)", config.server_port, enable_station_api);
 
@@ -289,12 +555,26 @@ esp_err_t http_server_start_ex(wifi_config_callback_t callback, bool enable_stat
 
     // Register base URI handlers
     httpd_register_uri_handler(s_server, &uri_root);
+    httpd_register_uri_handler(s_server, &uri_setup);
     httpd_register_uri_handler(s_server, &uri_connect);
     httpd_register_uri_handler(s_server, &uri_status);
+
+    // Register captive portal handlers
+    httpd_register_uri_handler(s_server, &uri_generate_204);
+    httpd_register_uri_handler(s_server, &uri_hotspot_detect);
 
     // Register Station API handlers if enabled
     if (enable_station_api) {
         httpd_register_uri_handler(s_server, &uri_api_status);
+
+#ifdef CHAT_ENABLED
+        httpd_register_uri_handler(s_server, &uri_api_chat_messages);
+        httpd_register_uri_handler(s_server, &uri_api_chat_send);
+
+        // Initialize chat system
+        mesh_chat_init();
+        ESP_LOGI(TAG, "Chat API endpoints registered");
+#endif
 
         // Register WebSocket handler
         ret = ws_server_register(s_server);
@@ -302,6 +582,7 @@ esp_err_t http_server_start_ex(wifi_config_callback_t callback, bool enable_stat
             ESP_LOGW(TAG, "Failed to register WebSocket handler: %s", esp_err_to_name(ret));
         }
 
+#if BOARD_MODEL == MODEL_ESP32S3_EPAPER_1IN54
         // Register tile server handler if SD card is available
         ret = tiles_register_http_handler(s_server);
         if (ret != ESP_OK) {
@@ -313,6 +594,7 @@ esp_err_t http_server_start_ex(wifi_config_callback_t callback, bool enable_stat
         if (ret != ESP_OK) {
             ESP_LOGI(TAG, "Update mirror not available (no SD card)");
         }
+#endif
 
         ESP_LOGI(TAG, "Station API endpoints registered");
     }

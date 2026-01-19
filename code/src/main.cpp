@@ -29,6 +29,11 @@
 // IP geolocation for timezone
 #include "geoloc.h"
 
+// Mesh networking (optional, enabled via CONFIG_GEOGRAM_MESH_ENABLED)
+#ifdef CONFIG_GEOGRAM_MESH_ENABLED
+#include "mesh_bsp.h"
+#endif
+
 // Include board-specific model initialization
 #if BOARD_MODEL == MODEL_ESP32S3_EPAPER_1IN54
     #include "model_config.h"
@@ -46,6 +51,14 @@
     #include "tiles.h"
     #include "updates.h"
     #include "ftp_server.h"
+#elif BOARD_MODEL == MODEL_ESP32C3_MINI
+    #include "model_config.h"
+    #include "model_init.h"
+    #include "wifi_bsp.h"
+    #include "http_server.h"
+    #if HAS_LED
+    #include "led_bsp.h"
+    #endif
 #elif BOARD_MODEL == MODEL_ESP32_GENERIC
     #include "model_config.h"
     #include "model_init.h"
@@ -56,6 +69,134 @@
 #endif
 
 static const char *TAG = "geogram";
+
+// ============================================================================
+// Mesh Networking Support (optional)
+// ============================================================================
+
+#ifdef CONFIG_GEOGRAM_MESH_ENABLED
+static bool s_mesh_mode = false;
+static bool s_mesh_connected = false;
+
+/**
+ * @brief Mesh event callback
+ */
+static void mesh_event_cb(geogram_mesh_event_t event, void *event_data)
+{
+    switch (event) {
+        case GEOGRAM_MESH_EVENT_CONNECTED:
+            ESP_LOGI(TAG, "Mesh connected, layer: %d", geogram_mesh_get_layer());
+            s_mesh_connected = true;
+
+#if BOARD_MODEL == MODEL_ESP32C3_MINI && HAS_LED
+            // System OK - solid green LED
+            led_set_state(LED_STATE_OK);
+#endif
+
+            // Start external AP for phone connections
+            // SSID: geogram-{callsign}, Password: geogram
+            {
+                char ap_ssid[32];
+                const char *callsign = nostr_keys_get_callsign();
+                if (callsign && strlen(callsign) > 0) {
+                    snprintf(ap_ssid, sizeof(ap_ssid), "geogram-%s", callsign);
+                } else {
+                    snprintf(ap_ssid, sizeof(ap_ssid), "geogram-mesh");
+                }
+                geogram_mesh_start_external_ap(ap_ssid, "geogram", CONFIG_GEOGRAM_MESH_EXTERNAL_AP_MAX_CONN);
+                ESP_LOGI(TAG, "External AP: %s (password: geogram)", ap_ssid);
+            }
+
+            // Enable IP bridging
+            geogram_mesh_enable_bridge();
+
+            // Initialize Station API
+            station_init();
+            http_server_start_ex(NULL, true);
+            ESP_LOGI(TAG, "Station API started on mesh node");
+
+            // Start Telnet server
+            if (telnet_server_start(TELNET_DEFAULT_PORT) == ESP_OK) {
+                ESP_LOGI(TAG, "Telnet server started on port %d", TELNET_DEFAULT_PORT);
+            }
+            break;
+
+        case GEOGRAM_MESH_EVENT_DISCONNECTED:
+            ESP_LOGW(TAG, "Mesh disconnected");
+            s_mesh_connected = false;
+
+#if BOARD_MODEL == MODEL_ESP32C3_MINI && HAS_LED
+            // Error state - blinking red LED
+            led_set_state(LED_STATE_ERROR);
+#endif
+
+            // Stop services
+            telnet_server_stop();
+            http_server_stop();
+            geogram_mesh_disable_bridge();
+            geogram_mesh_stop_external_ap();
+            break;
+
+        case GEOGRAM_MESH_EVENT_ROOT_CHANGED:
+            ESP_LOGI(TAG, "Root status changed: %s",
+                     geogram_mesh_is_root() ? "I am ROOT" : "I am CHILD");
+            break;
+
+        case GEOGRAM_MESH_EVENT_EXTERNAL_STA_CONNECTED:
+            ESP_LOGI(TAG, "Phone connected to mesh AP (%d total)",
+                     geogram_mesh_get_external_ap_client_count());
+            break;
+
+        case GEOGRAM_MESH_EVENT_EXTERNAL_STA_DISCONNECTED:
+            ESP_LOGI(TAG, "Phone disconnected from mesh AP (%d remaining)",
+                     geogram_mesh_get_external_ap_client_count());
+            break;
+
+        default:
+            break;
+    }
+}
+
+/**
+ * @brief Start mesh networking mode
+ */
+static void start_mesh_mode(void)
+{
+    ESP_LOGI(TAG, "Starting mesh networking mode");
+
+    // Initialize mesh subsystem
+    esp_err_t ret = geogram_mesh_init();
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Mesh init failed: %s", esp_err_to_name(ret));
+#if BOARD_MODEL == MODEL_ESP32C3_MINI && HAS_LED
+        led_set_state(LED_STATE_ERROR);
+#endif
+        return;
+    }
+
+    // Configure mesh network
+    geogram_mesh_config_t mesh_cfg = {
+        .mesh_id = {'g', 'e', 'o', 'm', 's', 'h'},  // "geomsh"
+        .password = "",
+        .channel = CONFIG_GEOGRAM_MESH_CHANNEL,
+        .max_layer = CONFIG_GEOGRAM_MESH_MAX_LAYER,
+        .allow_root = true,
+        .callback = mesh_event_cb
+    };
+
+    ret = geogram_mesh_start(&mesh_cfg);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Mesh start failed: %s", esp_err_to_name(ret));
+#if BOARD_MODEL == MODEL_ESP32C3_MINI && HAS_LED
+        led_set_state(LED_STATE_ERROR);
+#endif
+        return;
+    }
+
+    s_mesh_mode = true;
+    ESP_LOGI(TAG, "Mesh mode started, scanning for network...");
+}
+#endif  // CONFIG_GEOGRAM_MESH_ENABLED
 
 #if BOARD_MODEL == MODEL_ESP32S3_EPAPER_1IN54
 
@@ -413,6 +554,9 @@ static void start_ap_mode(void)
 {
     ESP_LOGI(TAG, "Starting AP mode for WiFi configuration");
 
+    // Ensure station identity is available for chat/API responses
+    station_init();
+
     // Build SSID with callsign: "geogram-X3ABCD"
     char ap_ssid[32];
     const char *callsign = nostr_keys_get_callsign();
@@ -431,8 +575,8 @@ static void start_ap_mode(void)
 
     geogram_wifi_start_ap(&ap_config);
 
-    // Start HTTP server for configuration
-    http_server_start(wifi_config_received);
+    // Start HTTP server with chat/API endpoints
+    http_server_start_ex(wifi_config_received, true);
 }
 
 /**
@@ -667,6 +811,63 @@ extern "C" void app_main(void)
     }
 
 #endif  // BOARD_MODEL == MODEL_ESP32S3_EPAPER_1IN54
+
+#if BOARD_MODEL == MODEL_ESP32C3_MINI
+    // Initialize NOSTR keys (needed for AP SSID with callsign)
+    ret = nostr_keys_init();
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG, "Failed to initialize NOSTR keys: %s", esp_err_to_name(ret));
+    } else {
+        ESP_LOGI(TAG, "Station callsign: %s", nostr_keys_get_callsign());
+    }
+
+    // Initialize WiFi
+    ret = geogram_wifi_init();
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to initialize WiFi: %s", esp_err_to_name(ret));
+#if HAS_LED
+        led_set_state(LED_STATE_ERROR);
+#endif
+    } else {
+        // Start WiFi AP mode
+        geogram_wifi_ap_config_t ap_config = {};
+        strncpy(ap_config.ssid, "geogram", sizeof(ap_config.ssid) - 1);
+        ap_config.password[0] = '\0';  // Open network
+        ap_config.channel = 1;
+        ap_config.max_connections = 4;
+        ap_config.callback = NULL;
+
+        ret = geogram_wifi_start_ap(&ap_config);
+        if (ret == ESP_OK) {
+            ESP_LOGI(TAG, "WiFi AP started: geogram");
+
+            // Start DNS server for captive portal
+            uint32_t ap_ip = 0;
+            if (geogram_wifi_get_ap_ip_addr(&ap_ip) == ESP_OK) {
+                dns_server_start(ap_ip);
+            }
+
+            // Initialize Station API and HTTP server
+            station_init();
+            http_server_start_ex(NULL, true);
+            ESP_LOGI(TAG, "HTTP server started");
+
+            // Start Telnet server
+            if (telnet_server_start(TELNET_DEFAULT_PORT) == ESP_OK) {
+                ESP_LOGI(TAG, "Telnet server started on port %d", TELNET_DEFAULT_PORT);
+            }
+
+#if HAS_LED
+            led_set_state(LED_STATE_OK);
+#endif
+        } else {
+            ESP_LOGE(TAG, "Failed to start WiFi AP: %s", esp_err_to_name(ret));
+#if HAS_LED
+            led_set_state(LED_STATE_ERROR);
+#endif
+        }
+    }
+#endif  // BOARD_MODEL == MODEL_ESP32C3_MINI
 
     // Main loop
     ESP_LOGI(TAG, "Entering main loop...");
