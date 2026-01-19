@@ -509,6 +509,12 @@ CONFIG_PARTITION_TABLE_MD5=y
 # end of Partition Table
 
 #
+# Geogram Mesh Networking
+#
+# CONFIG_GEOGRAM_MESH_ENABLED is not set
+# end of Geogram Mesh Networking
+
+#
 # Compiler options
 #
 # CONFIG_COMPILER_OPTIMIZATION_DEBUG is not set

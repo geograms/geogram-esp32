@@ -7,6 +7,9 @@
 #include <string.h>
 #include "esp_console.h"
 #include "argtable3/argtable3.h"
+#include "app_config.h"
+
+#if BOARD_MODEL == MODEL_ESP32S3_EPAPER_1IN54
 #include "ftp_server.h"
 
 static struct {
@@ -89,3 +92,11 @@ void register_ftp_commands(void)
 
     esp_console_cmd_register(&cmd);
 }
+
+#else
+// No FTP support for boards without SD card
+void register_ftp_commands(void)
+{
+    // FTP commands not available on this board
+}
+#endif

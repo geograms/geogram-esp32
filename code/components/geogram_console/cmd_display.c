@@ -10,12 +10,11 @@
 #include "esp_console.h"
 #include "esp_log.h"
 #include "argtable3/argtable3.h"
+#include "app_config.h"
 
 #if BOARD_MODEL == MODEL_ESP32S3_EPAPER_1IN54
 #include "lvgl_port.h"
 #endif
-
-#include "app_config.h"
 
 static const char *TAG = "cmd_display";
 

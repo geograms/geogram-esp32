@@ -82,6 +82,9 @@ void register_display_commands(void);
 void register_config_commands(void);
 void register_ssh_commands(void);
 void register_ftp_commands(void);
+#ifdef CONFIG_GEOGRAM_MESH_ENABLED
+void register_mesh_commands(void);
+#endif
 
 #ifdef __cplusplus
 }

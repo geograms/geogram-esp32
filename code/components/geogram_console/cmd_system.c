@@ -15,11 +15,14 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "station.h"
-#include "sdcard.h"
-#include "shtc3.h"
 #include "model_init.h"
 #include "app_config.h"
 #include "wifi_bsp.h"
+
+#if BOARD_MODEL == MODEL_ESP32S3_EPAPER_1IN54
+#include "sdcard.h"
+#include "shtc3.h"
+#endif
 
 static const char *TAG = "cmd_system";
 
@@ -81,11 +84,13 @@ static int cmd_status(int argc, char **argv)
 #endif
 
         // SD card
+#if BOARD_MODEL == MODEL_ESP32S3_EPAPER_1IN54
         if (sdcard_is_mounted()) {
             printf("\nSD Card: Mounted (%.2f GB)\n", sdcard_get_capacity_gb());
         } else {
             printf("\nSD Card: Not mounted\n");
         }
+#endif
 
         // Heap memory
         printf("Heap: %lu bytes free\n", (unsigned long)esp_get_free_heap_size());

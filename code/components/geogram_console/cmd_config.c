@@ -12,11 +12,11 @@
 #include "nvs_flash.h"
 #include "nvs.h"
 #include "station.h"
-#include "sdcard.h"
 #include "app_config.h"
 #include "wifi_bsp.h"
 
 #if BOARD_MODEL == MODEL_ESP32S3_EPAPER_1IN54
+#include "sdcard.h"
 #include "lvgl_port.h"
 #endif
 

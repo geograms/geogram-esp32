@@ -1,7 +1,16 @@
 #include "station.h"
 #include "json_utils.h"
 #include "nostr_keys.h"
+#include "app_config.h"
+
+#if BOARD_MODEL == MODEL_ESP32S3_EPAPER_1IN54
 #include "tiles.h"
+#endif
+
+#ifdef CONFIG_GEOGRAM_MESH_ENABLED
+#include "mesh_bsp.h"
+#endif
+
 #include <esp_log.h>
 #include <esp_wifi.h>
 #include <esp_timer.h>
@@ -202,11 +211,18 @@ size_t station_build_status_json(char *buffer, size_t size) {
     }
 
     // Tile server (available when SD card is present)
+#if BOARD_MODEL == MODEL_ESP32S3_EPAPER_1IN54
     bool tile_available = tiles_is_available();
     geo_json_add_bool(&builder, "tile_server", tile_available);
     geo_json_add_bool(&builder, "osm_fallback", !tile_available);
     geo_json_add_uint(&builder, "cache_size", tile_available ? tiles_get_cache_count() : 0);
     geo_json_add_uint(&builder, "cache_size_bytes", tile_available ? tiles_get_cache_size() : 0);
+#else
+    geo_json_add_bool(&builder, "tile_server", false);
+    geo_json_add_bool(&builder, "osm_fallback", true);
+    geo_json_add_uint(&builder, "cache_size", 0);
+    geo_json_add_uint(&builder, "cache_size_bytes", 0);
+#endif
 
     // Features
     geo_json_add_bool(&builder, "enable_aprs", false);
@@ -217,6 +233,17 @@ size_t station_build_status_json(char *buffer, size_t size) {
     geo_json_add_bool(&builder, "https_enabled", false);
     geo_json_add_int(&builder, "https_port", 0);
     geo_json_add_bool(&builder, "https_running", false);
+
+    // Mesh networking status
+#ifdef CONFIG_GEOGRAM_MESH_ENABLED
+    geo_json_add_bool(&builder, "mesh_enabled", true);
+    geo_json_add_bool(&builder, "mesh_connected", geogram_mesh_is_connected());
+    geo_json_add_bool(&builder, "mesh_is_root", geogram_mesh_is_root());
+    geo_json_add_int(&builder, "mesh_layer", geogram_mesh_get_layer());
+    geo_json_add_int(&builder, "mesh_nodes", geogram_mesh_get_node_count());
+#else
+    geo_json_add_bool(&builder, "mesh_enabled", false);
+#endif
 
     geo_json_object_end(&builder);
 
