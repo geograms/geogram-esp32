@@ -283,6 +283,12 @@ static const char *LANDING_PAGE_HTML_SUFFIX =
     "function normalizeSecretKey(sk){if(typeof sk==='string'){return {hex:sk,bytes:hexToBytes(sk)};}if(sk instanceof Uint8Array){return {hex:bytesToHex(sk),bytes:sk};}return null;}"
     "function getPublicKeyHex(sk){try{const pub=NostrTools.getPublicKey(sk);return pub instanceof Uint8Array?bytesToHex(pub):pub;}catch(e){if(typeof sk==='string'){const pub=NostrTools.getPublicKey(hexToBytes(sk));return pub instanceof Uint8Array?bytesToHex(pub):pub;}throw e;}"
     "}"
+    "function ensureNpubAndCallsign(){"
+    "if(!clientKeys||!clientKeys.pubkey||!window.NostrTools)return;"
+    "if(!clientKeys.npub){clientKeys.npub=NostrTools.nip19.npubEncode(clientKeys.pubkey);}"
+    "if(!clientKeys.callsign){clientKeys.callsign=callsignFromNpub(clientKeys.npub);}"
+    "localStorage.setItem(storageKey,JSON.stringify(clientKeys));"
+    "}"
     "async function generateKeys(){"
     "if(!window.NostrTools){throw new Error(window.nostrToolsError||'NostrTools missing');}"
     "let sk=null;"
@@ -301,10 +307,8 @@ static const char *LANDING_PAGE_HTML_SUFFIX =
     "async function initKeys(){"
     "if(window.nostr&&window.nostr.getPublicKey){"
     "try{const pubHex=await window.nostr.getPublicKey();"
-    "const npub=window.NostrTools?NostrTools.nip19.npubEncode(pubHex):'';"
-    "const callsign=callsignFromNpub(npub);"
-    "clientKeys={npub,callsign,mode:'extension',pubkey:pubHex};"
-    "localStorage.setItem(storageKey,JSON.stringify(clientKeys));"
+    "clientKeys={npub:'',callsign:'',mode:'extension',pubkey:pubHex};"
+    "ensureNpubAndCallsign();"
     "return;}catch(e){}"
     "}"
     "const saved=localStorage.getItem(storageKey);"
@@ -331,8 +335,8 @@ static const char *LANDING_PAGE_HTML_SUFFIX =
     "div.className='msg '+(m.local?'local':'remote');"
     "div.innerHTML='<div class=\"meta\"><span class=\"author\">'+esc(m.from)+'</span><span class=\"time\">'+fmtTime(m.ts)+'</span></div><div class=\"text\">'+esc(m.text)+'</div>';"
     "return div;}"
-    "async function signLocalEvent(content){"
-    "const event={kind:1,content:content,created_at:Math.floor(Date.now()/1000),tags:[],pubkey:clientKeys.pubkey};"
+    "async function signLocalEvent(content,createdAt,tags){"
+    "const event={kind:1,content:content,created_at:createdAt,tags:tags||[],pubkey:clientKeys.pubkey};"
     "const skBytes=clientKeys.privkey?hexToBytes(clientKeys.privkey):null;"
     "if(NostrTools.finalizeEvent){return NostrTools.finalizeEvent(event,skBytes||clientKeys.privkey);}"
     "event.id=NostrTools.getEventHash(event);"
@@ -359,14 +363,17 @@ static const char *LANDING_PAGE_HTML_SUFFIX =
     "if(!clientKeys){await initKeys();updateStatus();}"
     "$('send').disabled=true;"
     "try{"
-    "let body='text='+encodeURIComponent(txt)+'&callsign='+(clientKeys?encodeURIComponent(clientKeys.callsign):'');"
+    "const clientTs=Math.floor(Date.now()/1000);"
+    "const iso=new Date(clientTs*1000).toISOString();"
+    "const tags=[[\"client_time\",iso]];"
+    "let body='text='+encodeURIComponent(txt)+'&callsign='+(clientKeys?encodeURIComponent(clientKeys.callsign):'')+'&client_ts='+clientTs;"
     "if(clientKeys&&clientKeys.mode==='extension'&&window.nostr&&window.nostr.signEvent){"
-    "const event={kind:1,content:txt,created_at:Math.floor(Date.now()/1000),tags:[],pubkey:clientKeys.pubkey};"
+    "const event={kind:1,content:txt,created_at:clientTs,tags:tags,pubkey:clientKeys.pubkey};"
     "try{const signed=await window.nostr.signEvent(event);"
     "body+='&event='+encodeURIComponent(JSON.stringify(signed));"
     "}catch(e){}"
     "}else if(clientKeys&&clientKeys.mode==='local'){"
-    "try{const signed=await signLocalEvent(txt);"
+    "try{const signed=await signLocalEvent(txt,clientTs,tags);"
     "body+='&event='+encodeURIComponent(JSON.stringify(signed));"
     "}catch(e){}"
     "}"
@@ -693,11 +700,21 @@ static esp_err_t api_chat_send_post_handler(httpd_req_t *req)
     // Optional signed event (JSON string)
     char event_buf[512] = {0};
     bool has_event = extract_form_value(content, "event", event_buf, sizeof(event_buf));
+    char client_ts_buf[16] = {0};
+    extract_form_value(content, "client_ts", client_ts_buf, sizeof(client_ts_buf));
 
     free(content);
 
+    uint32_t client_ts = 0;
+    if (client_ts_buf[0] != '\0') {
+        client_ts = (uint32_t)strtoul(client_ts_buf, NULL, 10);
+    }
+
     // Store message locally with provided callsign (no mesh broadcast)
-    esp_err_t err = mesh_chat_add_local_message(callsign[0] ? callsign : NULL, text);
+    esp_err_t err = mesh_chat_add_local_message_with_timestamp(
+        callsign[0] ? callsign : NULL,
+        text,
+        client_ts);
     if (err != ESP_OK) {
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Failed to send");
         return ESP_FAIL;
@@ -709,7 +726,12 @@ static esp_err_t api_chat_send_post_handler(httpd_req_t *req)
 
     ESP_LOGI(TAG, "CHAT %s: %s", callsign[0] ? callsign : "GUEST", text);
     if (has_event && event_buf[0] != '\0') {
-        ESP_LOGI(TAG, "CHAT signed event received (%zu bytes)", strlen(event_buf));
+        if (client_ts) {
+            ESP_LOGI(TAG, "CHAT signed event received (%zu bytes, client_ts=%lu)",
+                     strlen(event_buf), (unsigned long)client_ts);
+        } else {
+            ESP_LOGI(TAG, "CHAT signed event received (%zu bytes)", strlen(event_buf));
+        }
     }
     return ESP_OK;
 }

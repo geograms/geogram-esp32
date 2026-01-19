@@ -233,6 +233,13 @@ esp_err_t mesh_chat_send(const char *text)
 
 esp_err_t mesh_chat_add_local_message(const char *callsign, const char *text)
 {
+    return mesh_chat_add_local_message_with_timestamp(callsign, text, 0);
+}
+
+esp_err_t mesh_chat_add_local_message_with_timestamp(const char *callsign,
+                                                     const char *text,
+                                                     uint32_t timestamp)
+{
     if (!s_initialized) {
         ESP_LOGE(TAG, "Chat not initialized");
         return ESP_ERR_INVALID_STATE;
@@ -249,8 +256,9 @@ esp_err_t mesh_chat_add_local_message(const char *callsign, const char *text)
 
     const char *sender = callsign && strlen(callsign) > 0 ? callsign : "GUEST";
 
+    const uint32_t msg_timestamp = timestamp ? timestamp : get_timestamp();
     mesh_chat_message_t local_msg = {
-        .timestamp = get_timestamp(),
+        .timestamp = msg_timestamp,
         .is_local = true,
         .msg_type = MESH_CHAT_MSG_TEXT
     };

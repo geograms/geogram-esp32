@@ -110,6 +110,15 @@ esp_err_t mesh_chat_send(const char *text);
  * @return ESP_OK on success
  */
 esp_err_t mesh_chat_add_local_message(const char *callsign, const char *text);
+/**
+ * @brief Add a local-only chat message with a custom callsign and timestamp
+ * @param callsign Sender callsign (optional)
+ * @param text Message text
+ * @param timestamp Unix timestamp (seconds). If 0, current device time is used.
+ */
+esp_err_t mesh_chat_add_local_message_with_timestamp(const char *callsign,
+                                                     const char *text,
+                                                     uint32_t timestamp);
 
 /**
  * @brief Send a file message to all mesh nodes
