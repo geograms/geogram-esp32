@@ -281,7 +281,7 @@ static const char *LANDING_PAGE_HTML_SUFFIX =
     "function getPublicKeyHex(sk){try{const pub=NostrTools.getPublicKey(sk);return pub instanceof Uint8Array?bytesToHex(pub):pub;}catch(e){if(typeof sk==='string'){const pub=NostrTools.getPublicKey(hexToBytes(sk));return pub instanceof Uint8Array?bytesToHex(pub):pub;}throw e;}"
     "}"
     "async function generateKeys(){"
-    "if(!window.NostrTools){throw new Error('NostrTools missing');}"
+    "if(!window.NostrTools){throw new Error(window.nostrToolsError||'NostrTools missing');}"
     "let sk=null;"
     "if(NostrTools.generateSecretKey){sk=NostrTools.generateSecretKey();}"
     "else if(NostrTools.generatePrivateKey){sk=NostrTools.generatePrivateKey();}"
@@ -479,7 +479,7 @@ static esp_err_t root_get_handler(httpd_req_t *req)
     ESP_LOGI(TAG, "HTTP GET / (chat landing page)");
     httpd_resp_set_type(req, "text/html");
     httpd_resp_sendstr_chunk(req, LANDING_PAGE_HTML_PREFIX);
-    httpd_resp_sendstr_chunk(req, "(0,eval)(atob(\"");
+    httpd_resp_sendstr_chunk(req, "try{const __nt=(new Function(atob(\"");
     const size_t chunk_size = 1024;
     const size_t total_len = strlen(NOSTR_TOOLS_B64);
     for (size_t offset = 0; offset < total_len; offset += chunk_size) {
@@ -489,7 +489,7 @@ static esp_err_t root_get_handler(httpd_req_t *req)
         }
         httpd_resp_send_chunk(req, NOSTR_TOOLS_B64 + offset, send_len);
     }
-    httpd_resp_sendstr_chunk(req, "\"));if(typeof NostrTools!=='undefined'){window.NostrTools=NostrTools;}");
+    httpd_resp_sendstr_chunk(req, "\")+\"\\n;return NostrTools;\"))();if(__nt){window.NostrTools=__nt;}}catch(e){window.nostrToolsError=(e&&e.message)?e.message:String(e);}");
     httpd_resp_sendstr_chunk(req, LANDING_PAGE_HTML_SUFFIX);
     return httpd_resp_sendstr_chunk(req, NULL);
 }
