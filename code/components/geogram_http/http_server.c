@@ -274,19 +274,31 @@ static const char *LANDING_PAGE_HTML_SUFFIX =
     "function fmtTime(ts){const d=new Date(ts*1000);return d.toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'});}"
     "const storageKey='geogram_nostr_keys';"
     "let clientKeys=null;"
+    "function bytesToHex(bytes){return Array.from(bytes,b=>b.toString(16).padStart(2,'0')).join('');}"
+    "function hexToBytes(hex){const out=new Uint8Array(hex.length/2);for(let i=0;i<out.length;i++){out[i]=parseInt(hex.substr(i*2,2),16);}return out;}"
     "function callsignFromNpub(npub){const base=npub.startsWith('npub1')?npub.slice(5):npub;return 'X1'+base.slice(0,4).toUpperCase();}"
+    "function normalizeSecretKey(sk){if(typeof sk==='string'){return {hex:sk,bytes:hexToBytes(sk)};}if(sk instanceof Uint8Array){return {hex:bytesToHex(sk),bytes:sk};}return null;}"
+    "function getPublicKeyHex(sk){try{const pub=NostrTools.getPublicKey(sk);return pub instanceof Uint8Array?bytesToHex(pub):pub;}catch(e){if(typeof sk==='string'){const pub=NostrTools.getPublicKey(hexToBytes(sk));return pub instanceof Uint8Array?bytesToHex(pub):pub;}throw e;}"
+    "}"
     "async function generateKeys(){"
-    "const priv=NostrTools.generatePrivateKey();"
-    "const pub=NostrTools.getPublicKey(priv);"
-    "const nsec=NostrTools.nip19.nsecEncode(priv);"
-    "const npub=NostrTools.nip19.npubEncode(pub);"
+    "if(!window.NostrTools){throw new Error('NostrTools missing');}"
+    "let sk=null;"
+    "if(NostrTools.generateSecretKey){sk=NostrTools.generateSecretKey();}"
+    "else if(NostrTools.generatePrivateKey){sk=NostrTools.generatePrivateKey();}"
+    "else if(window.crypto&&window.crypto.getRandomValues){const tmp=new Uint8Array(32);window.crypto.getRandomValues(tmp);sk=tmp;}"
+    "else{throw new Error('keygen not available');}"
+    "const norm=normalizeSecretKey(sk);"
+    "if(!norm){throw new Error('invalid key');}"
+    "const pubHex=getPublicKeyHex(norm.bytes||norm.hex);"
+    "const nsec=NostrTools.nip19.nsecEncode(norm.hex);"
+    "const npub=NostrTools.nip19.npubEncode(pubHex);"
     "const callsign=callsignFromNpub(npub);"
-    "return {nsec,npub,callsign,mode:'local',privkey:priv,pubkey:pub};"
+    "return {nsec,npub,callsign,mode:'local',privkey:norm.hex,pubkey:pubHex};"
     "}"
     "async function initKeys(){"
     "if(window.nostr&&window.nostr.getPublicKey){"
     "try{const pubHex=await window.nostr.getPublicKey();"
-    "const npub=NostrTools.nip19.npubEncode(pubHex);"
+    "const npub=window.NostrTools?NostrTools.nip19.npubEncode(pubHex):'';"
     "const callsign=callsignFromNpub(npub);"
     "clientKeys={npub,callsign,mode:'extension',pubkey:pubHex};"
     "localStorage.setItem(storageKey,JSON.stringify(clientKeys));"
@@ -294,6 +306,13 @@ static const char *LANDING_PAGE_HTML_SUFFIX =
     "}"
     "const saved=localStorage.getItem(storageKey);"
     "if(saved){try{clientKeys=JSON.parse(saved);}catch(e){clientKeys=null;}}"
+    "if(clientKeys&&clientKeys.mode==='local'&&clientKeys.privkey&&(!clientKeys.pubkey||!clientKeys.npub)){"
+    "const pubHex=getPublicKeyHex(clientKeys.privkey);"
+    "clientKeys.pubkey=pubHex;"
+    "clientKeys.npub=clientKeys.npub||NostrTools.nip19.npubEncode(pubHex);"
+    "clientKeys.callsign=clientKeys.callsign||callsignFromNpub(clientKeys.npub);"
+    "localStorage.setItem(storageKey,JSON.stringify(clientKeys));"
+    "}"
     "if(!clientKeys||!clientKeys.nsec||!clientKeys.npub||!clientKeys.callsign){"
     "clientKeys=await generateKeys();"
     "localStorage.setItem(storageKey,JSON.stringify(clientKeys));"
@@ -312,8 +331,10 @@ static const char *LANDING_PAGE_HTML_SUFFIX =
     "return div;}"
     "async function signLocalEvent(content){"
     "const event={kind:1,content:content,created_at:Math.floor(Date.now()/1000),tags:[],pubkey:clientKeys.pubkey};"
+    "const skBytes=clientKeys.privkey?hexToBytes(clientKeys.privkey):null;"
+    "if(NostrTools.finalizeEvent){return NostrTools.finalizeEvent(event,skBytes||clientKeys.privkey);}"
     "event.id=NostrTools.getEventHash(event);"
-    "event.sig=NostrTools.signEvent(event,clientKeys.privkey);"
+    "try{event.sig=NostrTools.signEvent(event,clientKeys.privkey);}catch(e){event.sig=NostrTools.signEvent(event,skBytes);}"
     "return event;}"
     "async function load(){"
     "try{"
@@ -352,7 +373,13 @@ static const char *LANDING_PAGE_HTML_SUFFIX =
     "$('send').disabled=false;inp.focus();}"
     "$('send').onclick=send;"
     "$('input').onkeypress=e=>{if(e.key==='Enter')send();};"
-    "(async()=>{try{await initKeys();updateStatus();await load();setInterval(load,3000);}catch(e){$('status').textContent='Keygen failed';}})();"
+    "async function reportClient(info){"
+    "try{const body='callsign='+encodeURIComponent(info.callsign||'')+'&npub='+encodeURIComponent(info.npub||'')+'&mode='+(info.mode||'')+'&error='+(info.error||'');"
+    "await fetch('/api/chat/client',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:body});"
+    "}catch(e){}"
+    "}"
+    "(async()=>{try{await initKeys();updateStatus();await reportClient(clientKeys);await load();setInterval(load,3000);}catch(e){"
+    "const msg=(e&&e.message)?e.message:'keygen failed';$('status').textContent='Keygen failed';await reportClient({error:msg});}})();"
     "if(window.visualViewport){"
     "const vv=window.visualViewport;"
     "vv.onresize=()=>{document.body.style.height=vv.height+'px';$('messages').scrollTop=$('messages').scrollHeight;};}"
@@ -449,11 +476,20 @@ static esp_err_t captive_portal_handler(httpd_req_t *req)
  */
 static esp_err_t root_get_handler(httpd_req_t *req)
 {
+    ESP_LOGI(TAG, "HTTP GET / (chat landing page)");
     httpd_resp_set_type(req, "text/html");
     httpd_resp_sendstr_chunk(req, LANDING_PAGE_HTML_PREFIX);
-    httpd_resp_sendstr_chunk(req, "eval(atob(\"");
-    httpd_resp_sendstr_chunk(req, NOSTR_TOOLS_B64);
-    httpd_resp_sendstr_chunk(req, "\"));");
+    httpd_resp_sendstr_chunk(req, "(0,eval)(atob(\"");
+    const size_t chunk_size = 1024;
+    const size_t total_len = strlen(NOSTR_TOOLS_B64);
+    for (size_t offset = 0; offset < total_len; offset += chunk_size) {
+        size_t send_len = total_len - offset;
+        if (send_len > chunk_size) {
+            send_len = chunk_size;
+        }
+        httpd_resp_send_chunk(req, NOSTR_TOOLS_B64 + offset, send_len);
+    }
+    httpd_resp_sendstr_chunk(req, "\"));if(typeof NostrTools!=='undefined'){window.NostrTools=NostrTools;}");
     httpd_resp_sendstr_chunk(req, LANDING_PAGE_HTML_SUFFIX);
     return httpd_resp_sendstr_chunk(req, NULL);
 }
@@ -606,6 +642,9 @@ static esp_err_t api_chat_messages_get_handler(httpd_req_t *req)
     httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
     httpd_resp_send(req, buffer, offset);
 
+    ESP_LOGI(TAG, "HTTP GET /api/chat/messages since=%lu (count=%d)",
+             (unsigned long)since_id, (int)mesh_chat_get_count());
+
     free(buffer);
     return ESP_OK;
 }
@@ -648,6 +687,10 @@ static esp_err_t api_chat_send_post_handler(httpd_req_t *req)
     char callsign[MESH_CHAT_MAX_CALLSIGN_LEN + 1] = {0};
     extract_form_value(content, "callsign", callsign, sizeof(callsign));
 
+    // Optional signed event (JSON string)
+    char event_buf[512] = {0};
+    bool has_event = extract_form_value(content, "event", event_buf, sizeof(event_buf));
+
     free(content);
 
     // Store message locally with provided callsign (no mesh broadcast)
@@ -655,6 +698,63 @@ static esp_err_t api_chat_send_post_handler(httpd_req_t *req)
     if (err != ESP_OK) {
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Failed to send");
         return ESP_FAIL;
+    }
+
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
+    httpd_resp_send(req, "{\"ok\":true}", 11);
+
+    ESP_LOGI(TAG, "CHAT %s: %s", callsign[0] ? callsign : "GUEST", text);
+    if (has_event && event_buf[0] != '\0') {
+        ESP_LOGI(TAG, "CHAT signed event received (%zu bytes)", strlen(event_buf));
+    }
+    return ESP_OK;
+}
+
+/**
+ * @brief Handler for /api/chat/client - client key status/info
+ */
+static esp_err_t api_chat_client_post_handler(httpd_req_t *req)
+{
+    char *content = malloc(1024);
+    if (!content) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Out of memory");
+        return ESP_FAIL;
+    }
+
+    int total_len = req->content_len;
+    if (total_len >= 1024) {
+        free(content);
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Content too long");
+        return ESP_FAIL;
+    }
+
+    int ret = httpd_req_recv(req, content, total_len);
+    if (ret <= 0) {
+        free(content);
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Failed to receive data");
+        return ESP_FAIL;
+    }
+    content[total_len] = '\0';
+
+    char callsign[MESH_CHAT_MAX_CALLSIGN_LEN + 1] = {0};
+    char npub[80] = {0};
+    char mode[16] = {0};
+    char error_msg[128] = {0};
+    extract_form_value(content, "callsign", callsign, sizeof(callsign));
+    extract_form_value(content, "npub", npub, sizeof(npub));
+    extract_form_value(content, "mode", mode, sizeof(mode));
+    extract_form_value(content, "error", error_msg, sizeof(error_msg));
+
+    free(content);
+
+    if (error_msg[0] != '\0') {
+        ESP_LOGW(TAG, "CHAT client keygen failed: %s", error_msg);
+    } else {
+        ESP_LOGI(TAG, "CHAT client key: %s %s (%s)",
+                 callsign[0] ? callsign : "UNKNOWN",
+                 npub[0] ? npub : "npub:missing",
+                 mode[0] ? mode : "unknown");
     }
 
     httpd_resp_set_type(req, "application/json");
@@ -674,6 +774,13 @@ static const httpd_uri_t uri_api_chat_send = {
     .uri = "/api/chat/send",
     .method = HTTP_POST,
     .handler = api_chat_send_post_handler,
+    .user_ctx = NULL
+};
+
+static const httpd_uri_t uri_api_chat_client = {
+    .uri = "/api/chat/client",
+    .method = HTTP_POST,
+    .handler = api_chat_client_post_handler,
     .user_ctx = NULL
 };
 
@@ -754,7 +861,7 @@ esp_err_t http_server_start_ex(wifi_config_callback_t callback, bool enable_stat
 
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.lru_purge_enable = true;
-    config.stack_size = 8192;
+    config.stack_size = 32768;
     config.max_uri_handlers = 16;
 
     ESP_LOGI(TAG, "Starting HTTP server on port %d (station_api=%d)", config.server_port, enable_station_api);
@@ -782,6 +889,7 @@ esp_err_t http_server_start_ex(wifi_config_callback_t callback, bool enable_stat
 #ifdef CHAT_ENABLED
         httpd_register_uri_handler(s_server, &uri_api_chat_messages);
         httpd_register_uri_handler(s_server, &uri_api_chat_send);
+        httpd_register_uri_handler(s_server, &uri_api_chat_client);
 
         // Initialize chat system
         mesh_chat_init();
