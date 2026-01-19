@@ -693,6 +693,9 @@ static void rtc_task(void *pvParameter)
 extern "C" void app_main(void)
 {
     ESP_LOGI(TAG, "=====================================");
+    geogram_log_plain(TAG, "  Offline-First Communication");
+    geogram_log_plain(TAG, "   · · · ·   ───   · ── ·   ·");
+    geogram_log_plain(TAG, "    Wi-Fi  ·  BLE  ·  NOSTR");
     ESP_LOGI(TAG, "  Geogram Firmware v%s", GEOGRAM_VERSION);
     ESP_LOGI(TAG, "  Board: %s", BOARD_NAME);
     ESP_LOGI(TAG, "  Model: %s", MODEL_NAME);
