@@ -118,6 +118,40 @@ static const char *LANDING_PAGE_HTML =
     "const $=id=>document.getElementById(id);"
     "function esc(s){return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}"
     "function fmtTime(ts){const d=new Date(ts*1000);return d.toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'});}"
+    "const storageKey='geogram_nostr_keys';"
+    "let clientKeys=null;"
+    "const BECH32_ALPHABET='qpzry9x8gf2tvdw0s3jn54khce6mua7l';"
+    "function b64urlToBytes(s){s=s.replace(/-/g,'+').replace(/_/g,'/');const pad=s.length%4?4-(s.length%4):0;const str=s+'='.repeat(pad);const bin=atob(str);const out=new Uint8Array(bin.length);for(let i=0;i<bin.length;i++){out[i]=bin.charCodeAt(i);}return out;}"
+    "function bech32Polymod(values){let chk=1;const gen=[0x3b6a57b2,0x26508e6d,0x1ea119fa,0x3d4233dd,0x2a1462b3];for(const v of values){const top=chk>>25;chk=(chk&0x1ffffff)<<5^v;for(let i=0;i<5;i++){if((top>>i)&1){chk^=gen[i];}}}return chk;}"
+    "function bech32HrpExpand(hrp){const ret=[];for(let i=0;i<hrp.length;i++)ret.push(hrp.charCodeAt(i)>>5);ret.push(0);for(let i=0;i<hrp.length;i++)ret.push(hrp.charCodeAt(i)&31);return ret;}"
+    "function bech32CreateChecksum(hrp,data){const values=bech32HrpExpand(hrp).concat(data);values.push(0,0,0,0,0,0);const mod=bech32Polymod(values)^1;const ret=[];for(let p=0;p<6;p++){ret.push((mod>>5*(5-p))&31);}return ret;}"
+    "function bech32Encode(hrp,data){const combined=data.concat(bech32CreateChecksum(hrp,data));let ret=hrp+'1';for(const d of combined){ret+=BECH32_ALPHABET[d];}return ret;}"
+    "function convertBits(data,fromBits,toBits,pad){let acc=0,bits=0;const ret=[];const maxv=(1<<toBits)-1;for(const value of data){if(value<0||(value>>fromBits))return null;acc=(acc<<fromBits)|value;bits+=fromBits;while(bits>=toBits){bits-=toBits;ret.push((acc>>bits)&maxv);}}if(pad){if(bits){ret.push((acc<<(toBits-bits))&maxv);}}else if(bits>=fromBits||((acc<<(toBits-bits))&maxv)){return null;}return ret;}"
+    "function bech32FromBytes(hrp,bytes){const data=convertBits(bytes,8,5,true);return bech32Encode(hrp,data);}"
+    "function callsignFromNpub(npub){const base=npub.startsWith('npub1')?npub.slice(5):npub;return 'X1'+base.slice(0,4).toUpperCase();}"
+    "async function generateKeys(){"
+    "if(!window.crypto||!window.crypto.subtle){throw new Error('WebCrypto unavailable');}"
+    "const keyPair=await crypto.subtle.generateKey({name:'ECDSA',namedCurve:'K-256'},true,['sign','verify']);"
+    "const jwkPriv=await crypto.subtle.exportKey('jwk',keyPair.privateKey);"
+    "const jwkPub=await crypto.subtle.exportKey('jwk',keyPair.publicKey);"
+    "const privBytes=b64urlToBytes(jwkPriv.d);"
+    "const pubX=b64urlToBytes(jwkPub.x);"
+    "const nsec=bech32FromBytes('nsec',Array.from(privBytes));"
+    "const npub=bech32FromBytes('npub',Array.from(pubX));"
+    "const callsign=callsignFromNpub(npub);"
+    "return {nsec,npub,callsign};"
+    "}"
+    "async function initKeys(){"
+    "const saved=localStorage.getItem(storageKey);"
+    "if(saved){try{clientKeys=JSON.parse(saved);}catch(e){clientKeys=null;}}"
+    "if(!clientKeys||!clientKeys.nsec||!clientKeys.npub||!clientKeys.callsign){"
+    "clientKeys=await generateKeys();"
+    "localStorage.setItem(storageKey,JSON.stringify(clientKeys));"
+    "}"
+    "}"
+    "function updateStatus(){"
+    "if(clientKeys&&clientKeys.callsign){$('status').textContent='You: '+clientKeys.callsign;}else{$('status').textContent='No keys';}"
+    "}"
     "function render(m){"
     "const div=document.createElement('div');"
     "div.className='msg '+(m.local?'local':'remote');"
@@ -128,27 +162,29 @@ static const char *LANDING_PAGE_HTML =
     "const r=await fetch('/api/chat/messages?since='+lastId);"
     "if(!r.ok)return;"
     "const d=await r.json();"
-    "$('status').textContent=d.my_callsign||'Offgrid';"
     "if(d.max_len)maxLen=d.max_len;"
     "$('input').maxLength=maxLen;"
     "if(d.messages&&d.messages.length){"
     "d.messages.forEach(m=>{if(m.id>lastId){$('messages').appendChild(render(m));lastId=m.id;}});"
     "$('messages').scrollTop=$('messages').scrollHeight;}"
     "if(d.latest_id>lastId)lastId=d.latest_id;"
-    "$('count').textContent=d.count?d.count+' msgs':'';"
+    "const station=d.my_callsign?('Station '+d.my_callsign):'';"
+    "$('count').textContent=d.count?(d.count+' msgs '+station):station;"
     "}catch(e){$('status').textContent='Offline';}}"
     "async function send(){"
     "const inp=$('input'),txt=inp.value.trim();"
     "if(!txt)return;"
+    "if(!clientKeys){await initKeys();updateStatus();}"
     "$('send').disabled=true;"
     "try{"
-    "const r=await fetch('/api/chat/send',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'text='+encodeURIComponent(txt)});"
+    "const body='text='+encodeURIComponent(txt)+'&callsign='+(clientKeys?encodeURIComponent(clientKeys.callsign):'');"
+    "const r=await fetch('/api/chat/send',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:body});"
     "if(r.ok){inp.value='';await load();}"
     "}catch(e){}"
     "$('send').disabled=false;inp.focus();}"
     "$('send').onclick=send;"
     "$('input').onkeypress=e=>{if(e.key==='Enter')send();};"
-    "load();setInterval(load,3000);"
+    "(async()=>{try{await initKeys();updateStatus();await load();setInterval(load,3000);}catch(e){$('status').textContent='Keygen failed';}})();"
     "if(window.visualViewport){"
     "const vv=window.visualViewport;"
     "vv.onresize=()=>{document.body.style.height=vv.height+'px';$('messages').scrollTop=$('messages').scrollHeight;};}"
@@ -436,10 +472,14 @@ static esp_err_t api_chat_send_post_handler(httpd_req_t *req)
         return ESP_FAIL;
     }
 
+    // Optional callsign from client
+    char callsign[MESH_CHAT_MAX_CALLSIGN_LEN + 1] = {0};
+    extract_form_value(content, "callsign", callsign, sizeof(callsign));
+
     free(content);
 
-    // Send message
-    esp_err_t err = mesh_chat_send(text);
+    // Store message locally with provided callsign (no mesh broadcast)
+    esp_err_t err = mesh_chat_add_local_message(callsign[0] ? callsign : NULL, text);
     if (err != ESP_OK) {
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Failed to send");
         return ESP_FAIL;

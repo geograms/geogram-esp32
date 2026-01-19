@@ -228,6 +228,52 @@ esp_err_t mesh_chat_send(const char *text)
 }
 
 // ============================================================================
+// Local-only Message (custom callsign)
+// ============================================================================
+
+esp_err_t mesh_chat_add_local_message(const char *callsign, const char *text)
+{
+    if (!s_initialized) {
+        ESP_LOGE(TAG, "Chat not initialized");
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    if (!text || strlen(text) == 0) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    size_t text_len = strlen(text);
+    if (text_len > MESH_CHAT_MAX_MESSAGE_LEN) {
+        text_len = MESH_CHAT_MAX_MESSAGE_LEN;
+    }
+
+    const char *sender = callsign && strlen(callsign) > 0 ? callsign : "GUEST";
+
+    mesh_chat_message_t local_msg = {
+        .timestamp = get_timestamp(),
+        .is_local = true,
+        .msg_type = MESH_CHAT_MSG_TEXT
+    };
+    memset(&local_msg.file, 0, sizeof(local_msg.file));
+
+    xSemaphoreTake(s_mutex, portMAX_DELAY);
+    local_msg.id = s_next_msg_id++;
+    xSemaphoreGive(s_mutex);
+
+    strncpy(local_msg.callsign, sender, MESH_CHAT_MAX_CALLSIGN_LEN - 1);
+    strncpy(local_msg.text, text, MESH_CHAT_MAX_MESSAGE_LEN);
+    memcpy(local_msg.sender_mac, s_local_mac, 6);
+
+    add_message_to_history(&local_msg);
+
+    if (s_callback) {
+        s_callback(&local_msg);
+    }
+
+    return ESP_OK;
+}
+
+// ============================================================================
 // Send File Message
 // ============================================================================
 

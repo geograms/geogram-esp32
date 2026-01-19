@@ -104,6 +104,14 @@ void mesh_chat_deinit(void);
 esp_err_t mesh_chat_send(const char *text);
 
 /**
+ * @brief Add a local-only chat message with a custom callsign
+ * @param callsign Sender callsign (NULL or empty uses a default)
+ * @param text Message text (max MESH_CHAT_MAX_MESSAGE_LEN chars)
+ * @return ESP_OK on success
+ */
+esp_err_t mesh_chat_add_local_message(const char *callsign, const char *text);
+
+/**
  * @brief Send a file message to all mesh nodes
  * @param text Optional caption/description text
  * @param sha1 SHA1 hash of file content (20 bytes)
