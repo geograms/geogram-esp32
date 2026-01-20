@@ -1,5 +1,69 @@
 Import("env")
 import os
+import re
+
+def patch_legacy_driver(filepath, driver_name):
+    """
+    Patch an ESP-IDF legacy driver to disable the conflict check.
+    This is needed because ESP-Mesh-Lite/iot_bridge pulls in new drivers,
+    but the legacy drivers are also compiled, causing runtime conflicts.
+    """
+    if not os.path.exists(filepath):
+        return False
+
+    with open(filepath, 'r') as f:
+        content = f.read()
+
+    # Check if already patched
+    if "GEOGRAM_PATCHED" in content:
+        return True
+
+    # Pattern to match ESP_EARLY_LOGE with any tag name, capturing the tag
+    # Match: ESP_EARLY_LOGE(SOMETHING, "CONFLICT..."); abort();
+    pattern = r'(\s+)ESP_EARLY_LOGE\(([^,]+),\s*"CONFLICT[^"]*"\);\s*abort\(\);'
+
+    def replacement(m):
+        indent = m.group(1)
+        tag = m.group(2)
+        return f'{indent}// GEOGRAM_PATCHED: Conflict check disabled for ESP-Mesh-Lite compatibility\n{indent}ESP_EARLY_LOGW({tag}, "GEOGRAM_PATCHED: {driver_name} driver coexistence allowed");'
+
+    new_content = re.sub(pattern, replacement, content, flags=re.DOTALL)
+
+    if new_content != content:
+        with open(filepath, 'w') as f:
+            f.write(new_content)
+        print(f"[Geogram] Patched ESP-IDF legacy {driver_name} driver")
+        return True
+
+    return False
+
+def patch_all_legacy_drivers():
+    """Patch all legacy drivers that have conflict checks."""
+    framework_dir = env.PioPlatform().get_package_dir("framework-espidf")
+    deprecated_dir = os.path.join(framework_dir, "components", "driver", "deprecated")
+    driver_dir = os.path.join(framework_dir, "components", "driver")
+
+    # List of legacy drivers with conflict checks
+    # ESP-IDF 5.x has many legacy drivers that abort if new driver is also present
+    deprecated_drivers = [
+        ("deprecated/rtc_temperature_legacy.c", "temp_sensor"),
+        ("deprecated/rmt_legacy.c", "rmt"),
+        ("deprecated/mcpwm_legacy.c", "mcpwm"),
+        ("deprecated/pcnt_legacy.c", "pcnt"),
+        ("deprecated/timer_legacy.c", "timer"),
+        ("deprecated/i2s_legacy.c", "i2s"),
+        ("deprecated/sigma_delta_legacy.c", "sigma_delta"),
+        ("deprecated/adc_legacy.c", "adc"),
+        ("deprecated/adc_dma_legacy.c", "adc_dma"),
+        # I2C driver is in main directory but also has conflict check
+        ("i2c/i2c.c", "i2c"),
+        ("spi/gpspi/spi_common.c", "spi"),
+    ]
+
+    for filepath_rel, driver_name in deprecated_drivers:
+        filepath = os.path.join(driver_dir, filepath_rel)
+        if os.path.exists(filepath):
+            patch_legacy_driver(filepath, driver_name)
 
 def pre_build_action(source, target, env):
     """
@@ -17,5 +81,8 @@ def pre_build_action(source, target, env):
     # Ensure firmware output directory exists
     firmware_dir = os.path.join(env.subst("$PROJECT_DIR"), "firmware")
     os.makedirs(firmware_dir, exist_ok=True)
+
+# Apply patches early
+patch_all_legacy_drivers()
 
 env.AddPreAction("buildprog", pre_build_action)

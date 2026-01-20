@@ -1,6 +1,9 @@
 /**
  * @file mesh_bsp.c
- * @brief Geogram ESP-MESH networking core implementation
+ * @brief Geogram ESP-Mesh-Lite networking core implementation
+ *
+ * Uses ESP-Mesh-Lite for router-less mesh with native phone/laptop connectivity.
+ * Each node has its own LWIP stack and can host external clients directly.
  */
 
 #include "mesh_bsp.h"
@@ -12,13 +15,24 @@
 #include "esp_log.h"
 #include "esp_mac.h"
 #include "esp_wifi.h"
-#include "esp_mesh.h"
-#include "esp_mesh_internal.h"
+#include "esp_bridge.h"
+#include "esp_mesh_lite.h"
 #include "esp_netif.h"
 #include "esp_event.h"
 #include "nvs_flash.h"
 #include "nvs.h"
 #include "lwip/ip4_addr.h"
+
+// ============================================================================
+// NAPT stub - iot_bridge expects a patched LWIP with ip_napt_table_clear()
+// This stub provides the missing function for PlatformIO builds without the patch
+// ============================================================================
+__attribute__((weak)) void ip_napt_table_clear(void)
+{
+    // Stub - patched LWIP has the real implementation
+    // This function clears NAPT entries when the router interface changes
+    ESP_LOGW("mesh_bsp", "ip_napt_table_clear stub called - LWIP NAPT patch not applied");
+}
 
 static const char *TAG = "mesh_bsp";
 
@@ -32,10 +46,6 @@ static const char *TAG = "mesh_bsp";
 
 #ifndef CONFIG_GEOGRAM_MESH_MAX_LAYER
 #define CONFIG_GEOGRAM_MESH_MAX_LAYER 6
-#endif
-
-#ifndef CONFIG_GEOGRAM_MESH_ROUTE_TABLE_SIZE
-#define CONFIG_GEOGRAM_MESH_ROUTE_TABLE_SIZE 50
 #endif
 
 #ifndef CONFIG_GEOGRAM_MESH_EXTERNAL_AP_MAX_CONN
@@ -53,32 +63,19 @@ static geogram_mesh_event_cb_t s_event_callback = NULL;
 static geogram_mesh_data_cb_t s_data_callback = NULL;
 
 // Mesh configuration
-static mesh_addr_t s_mesh_id;
+static uint8_t s_mesh_id[6];
 static uint8_t s_channel = CONFIG_GEOGRAM_MESH_CHANNEL;
 static uint8_t s_max_layer = CONFIG_GEOGRAM_MESH_MAX_LAYER;
 static bool s_is_root = false;
 static uint8_t s_layer = 0;
 static uint8_t s_subnet_id = 0;
-static mesh_addr_t s_parent_mac;
+static uint8_t s_parent_mac[6];
 static bool s_has_parent = false;
 
 // External AP state
 static bool s_external_ap_running = false;
 static char s_external_ap_ssid[33] = {0};
 static uint8_t s_external_ap_clients = 0;
-static esp_netif_t *s_external_netif = NULL;
-
-// Route table
-static mesh_addr_t s_route_table[CONFIG_GEOGRAM_MESH_ROUTE_TABLE_SIZE];
-static int s_route_table_size = 0;
-
-// Network interfaces
-static esp_netif_t *s_mesh_sta_netif = NULL;
-static esp_netif_t *s_mesh_ap_netif = NULL;
-
-// Receive task
-static TaskHandle_t s_rx_task = NULL;
-static bool s_rx_task_running = false;
 
 // NVS namespace
 #define MESH_NVS_NAMESPACE "mesh_config"
@@ -87,14 +84,12 @@ static bool s_rx_task_running = false;
 // Forward declarations
 // ============================================================================
 
-static void mesh_event_handler(void *arg, esp_event_base_t event_base,
+static void mesh_lite_event_handler(void *arg, esp_event_base_t base,
+                                    int32_t event_id, void *data);
+static void wifi_event_handler(void *arg, esp_event_base_t event_base,
                                int32_t event_id, void *event_data);
 static void ip_event_handler(void *arg, esp_event_base_t event_base,
                              int32_t event_id, void *event_data);
-static void wifi_ap_event_handler(void *arg, esp_event_base_t event_base,
-                                  int32_t event_id, void *event_data);
-static void mesh_rx_task(void *arg);
-static void update_route_table(void);
 static uint8_t calculate_subnet_id(const uint8_t *mac);
 
 // ============================================================================
@@ -108,12 +103,20 @@ esp_err_t geogram_mesh_init(void)
         return ESP_OK;
     }
 
-    // Suppress verbose internal ESP-MESH network scanning logs
-    esp_log_level_set("mesh", ESP_LOG_WARN);
+    // Debug: Print build-time configuration values
+    ESP_LOGI(TAG, "========================================");
+    ESP_LOGI(TAG, "[CONFIG] Build-time configuration:");
+    ESP_LOGI(TAG, "[CONFIG] CONFIG_FREERTOS_TIMER_TASK_STACK_DEPTH=%d",
+             CONFIG_FREERTOS_TIMER_TASK_STACK_DEPTH);
+    ESP_LOGI(TAG, "[CONFIG] CONFIG_ESP_TIMER_TASK_STACK_SIZE=%d",
+             CONFIG_ESP_TIMER_TASK_STACK_SIZE);
+    ESP_LOGI(TAG, "[CONFIG] CONFIG_ESP_MAIN_TASK_STACK_SIZE=%d",
+             CONFIG_ESP_MAIN_TASK_STACK_SIZE);
+    ESP_LOGI(TAG, "[CONFIG] CONFIG_ESP_SYSTEM_EVENT_TASK_STACK_SIZE=%d",
+             CONFIG_ESP_SYSTEM_EVENT_TASK_STACK_SIZE);
+    ESP_LOGI(TAG, "========================================");
 
-    ESP_LOGI(TAG, "========================================");
-    ESP_LOGI(TAG, "Initializing ESP-MESH subsystem");
-    ESP_LOGI(TAG, "========================================");
+    ESP_LOGI(TAG, "Initializing ESP-Mesh-Lite subsystem");
 
     esp_err_t ret;
 
@@ -133,7 +136,7 @@ esp_err_t geogram_mesh_init(void)
         return ret;
     }
 
-    // Initialize TCP/IP stack (may already be initialized by wifi_bsp)
+    // Initialize TCP/IP stack (may already be initialized)
     ret = esp_netif_init();
     if (ret != ESP_OK && ret != ESP_ERR_INVALID_STATE) {
         ESP_LOGE(TAG, "[INIT] Failed to init netif: %s", esp_err_to_name(ret));
@@ -153,53 +156,11 @@ esp_err_t geogram_mesh_init(void)
         ESP_LOGI(TAG, "[INIT] Event loop already exists");
     }
 
-    // Reuse existing STA netif if already created, otherwise create new
-    s_mesh_sta_netif = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
-    if (!s_mesh_sta_netif) {
-        s_mesh_sta_netif = esp_netif_create_default_wifi_sta();
-        ESP_LOGI(TAG, "[INIT] Created new STA netif");
-    } else {
-        ESP_LOGI(TAG, "[INIT] Reusing existing STA netif");
-    }
-
-    // Reuse existing AP netif if already created, otherwise create new
-    s_mesh_ap_netif = esp_netif_get_handle_from_ifkey("WIFI_AP_DEF");
-    if (!s_mesh_ap_netif) {
-        s_mesh_ap_netif = esp_netif_create_default_wifi_ap();
-        ESP_LOGI(TAG, "[INIT] Created new AP netif");
-    } else {
-        ESP_LOGI(TAG, "[INIT] Reusing existing AP netif");
-    }
-
-    // Initialize WiFi (may already be initialized)
-    wifi_init_config_t wifi_cfg = WIFI_INIT_CONFIG_DEFAULT();
-    ret = esp_wifi_init(&wifi_cfg);
-    if (ret != ESP_OK && ret != ESP_ERR_WIFI_INIT_STATE) {
-        ESP_LOGE(TAG, "[INIT] Failed to init WiFi: %s", esp_err_to_name(ret));
-        return ret;
-    }
-    if (ret == ESP_ERR_WIFI_INIT_STATE) {
-        ESP_LOGI(TAG, "[INIT] WiFi already initialized");
-    }
-
-    ret = esp_wifi_set_storage(WIFI_STORAGE_FLASH);
-    if (ret != ESP_OK) {
-        ESP_LOGW(TAG, "[INIT] Failed to set WiFi storage: %s", esp_err_to_name(ret));
-        // Non-fatal, continue
-    }
-
-    // Start WiFi (may already be started)
-    ret = esp_wifi_start();
-    if (ret != ESP_OK && ret != ESP_ERR_WIFI_CONN) {
-        ESP_LOGE(TAG, "[INIT] Failed to start WiFi: %s", esp_err_to_name(ret));
-        return ret;
-    }
-
     // Register event handlers
     ret = esp_event_handler_instance_register(
-        MESH_EVENT, ESP_EVENT_ANY_ID, &mesh_event_handler, NULL, NULL);
+        WIFI_EVENT, ESP_EVENT_ANY_ID, &wifi_event_handler, NULL, NULL);
     if (ret != ESP_OK && ret != ESP_ERR_INVALID_STATE) {
-        ESP_LOGE(TAG, "[INIT] Failed to register mesh event handler: %s", esp_err_to_name(ret));
+        ESP_LOGE(TAG, "[INIT] Failed to register WiFi event handler: %s", esp_err_to_name(ret));
         return ret;
     }
 
@@ -210,24 +171,46 @@ esp_err_t geogram_mesh_init(void)
         return ret;
     }
 
-    // Register WiFi AP event handlers for non-mesh client tracking
-    ret = esp_event_handler_instance_register(
-        WIFI_EVENT, WIFI_EVENT_AP_STACONNECTED, &wifi_ap_event_handler, NULL, NULL);
-    if (ret != ESP_OK && ret != ESP_ERR_INVALID_STATE) {
-        ESP_LOGW(TAG, "[INIT] Failed to register AP_STACONNECTED handler: %s", esp_err_to_name(ret));
+    // Create all bridge network interfaces (STA + SoftAP)
+    // This is required before WiFi and mesh-lite initialization
+    esp_bridge_create_all_netif();
+    ESP_LOGI(TAG, "[INIT] Bridge network interfaces created");
+
+    // Initialize WiFi
+    wifi_init_config_t wifi_cfg = WIFI_INIT_CONFIG_DEFAULT();
+    ret = esp_wifi_init(&wifi_cfg);
+    if (ret != ESP_OK && ret != ESP_ERR_WIFI_INIT_STATE) {
+        ESP_LOGE(TAG, "[INIT] Failed to init WiFi: %s", esp_err_to_name(ret));
+        return ret;
     }
-    ret = esp_event_handler_instance_register(
-        WIFI_EVENT, WIFI_EVENT_AP_STADISCONNECTED, &wifi_ap_event_handler, NULL, NULL);
-    if (ret != ESP_OK && ret != ESP_ERR_INVALID_STATE) {
-        ESP_LOGW(TAG, "[INIT] Failed to register AP_STADISCONNECTED handler: %s", esp_err_to_name(ret));
+    if (ret == ESP_ERR_WIFI_INIT_STATE) {
+        ESP_LOGI(TAG, "[INIT] WiFi already initialized");
     }
 
-    // Initialize mesh
-    ESP_LOGI(TAG, "[INIT] Initializing ESP-MESH stack...");
-    ret = esp_mesh_init();
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "[INIT] Failed to init mesh: %s", esp_err_to_name(ret));
-        return ret;
+    // Set WiFi storage and mode
+    ESP_ERROR_CHECK(esp_wifi_set_storage(WIFI_STORAGE_RAM));
+    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_APSTA));
+
+    // Start WiFi before mesh-lite init
+    ESP_ERROR_CHECK(esp_wifi_start());
+
+    // Debug: Dump timer task info to verify stack sizes
+    TaskStatus_t *task_array;
+    UBaseType_t task_count = uxTaskGetNumberOfTasks();
+    task_array = pvPortMalloc(task_count * sizeof(TaskStatus_t));
+    if (task_array) {
+        task_count = uxTaskGetSystemState(task_array, task_count, NULL);
+        ESP_LOGI(TAG, "[TASKS] Running tasks (%lu):", (unsigned long)task_count);
+        for (UBaseType_t i = 0; i < task_count; i++) {
+            if (strstr(task_array[i].pcTaskName, "Tmr") != NULL ||
+                strstr(task_array[i].pcTaskName, "timer") != NULL ||
+                strstr(task_array[i].pcTaskName, "esp_timer") != NULL) {
+                ESP_LOGI(TAG, "[TASKS] %s: stack high water mark = %lu words",
+                         task_array[i].pcTaskName,
+                         (unsigned long)task_array[i].usStackHighWaterMark);
+            }
+        }
+        vPortFree(task_array);
     }
 
     s_initialized = true;
@@ -247,18 +230,8 @@ esp_err_t geogram_mesh_deinit(void)
         geogram_mesh_stop();
     }
 
-    esp_mesh_deinit();
     esp_wifi_stop();
     esp_wifi_deinit();
-
-    if (s_mesh_sta_netif) {
-        esp_netif_destroy(s_mesh_sta_netif);
-        s_mesh_sta_netif = NULL;
-    }
-    if (s_mesh_ap_netif) {
-        esp_netif_destroy(s_mesh_ap_netif);
-        s_mesh_ap_netif = NULL;
-    }
 
     s_initialized = false;
     s_status = GEOGRAM_MESH_STATUS_STOPPED;
@@ -289,7 +262,7 @@ esp_err_t geogram_mesh_start(const geogram_mesh_config_t *config)
     }
 
     ESP_LOGI(TAG, "========================================");
-    ESP_LOGI(TAG, "[START] Starting ESP-MESH network");
+    ESP_LOGI(TAG, "[START] Starting ESP-Mesh-Lite network");
     ESP_LOGI(TAG, "[START] Channel: %d", config->channel);
     ESP_LOGI(TAG, "[START] Max Layer: %d", config->max_layer);
     ESP_LOGI(TAG, "[START] Allow Root: %s", config->allow_root ? "YES" : "NO");
@@ -298,54 +271,11 @@ esp_err_t geogram_mesh_start(const geogram_mesh_config_t *config)
              config->mesh_id[3], config->mesh_id[4], config->mesh_id[5]);
     ESP_LOGI(TAG, "========================================");
 
-    // Store callback
+    // Store configuration
     s_event_callback = config->callback;
-
-    // Configure mesh
-    mesh_cfg_t mesh_cfg = MESH_INIT_CONFIG_DEFAULT();
-
-    // Set mesh ID
-    memcpy(&s_mesh_id, config->mesh_id, 6);
-    memcpy(&mesh_cfg.mesh_id, config->mesh_id, 6);
-
-    // Set channel
+    memcpy(s_mesh_id, config->mesh_id, 6);
     s_channel = config->channel;
-    mesh_cfg.channel = config->channel;
-
-    // ESP-MESH requires a non-empty router SSID in the config. Use a dummy SSID
-    // for off-grid self-organized mesh so config validation passes.
-    const char *router_ssid = "geogram-mesh";
-    size_t router_ssid_len = strlen(router_ssid);
-    if (router_ssid_len > sizeof(mesh_cfg.router.ssid)) {
-        router_ssid_len = sizeof(mesh_cfg.router.ssid);
-    }
-    mesh_cfg.router.ssid_len = (uint8_t)router_ssid_len;
-    memset(&mesh_cfg.router.ssid, 0, sizeof(mesh_cfg.router.ssid));
-    memcpy(mesh_cfg.router.ssid, router_ssid, router_ssid_len);
-    memset(&mesh_cfg.router.bssid, 0, sizeof(mesh_cfg.router.bssid));
-    ESP_LOGI(TAG, "[START] Router SSID placeholder: %s", router_ssid);
-
-    // Set mesh AP config
-    mesh_cfg.mesh_ap.max_connection = CONFIG_GEOGRAM_MESH_EXTERNAL_AP_MAX_CONN;
-    mesh_cfg.mesh_ap.nonmesh_max_connection = CONFIG_GEOGRAM_MESH_EXTERNAL_AP_MAX_CONN;
-    if (strlen(config->password) > 0) {
-        memcpy(mesh_cfg.mesh_ap.password, config->password, strlen(config->password));
-    }
-
-    ESP_ERROR_CHECK(esp_mesh_set_config(&mesh_cfg));
-
-    // Set max layer
     s_max_layer = config->max_layer;
-    ESP_ERROR_CHECK(esp_mesh_set_max_layer(config->max_layer));
-
-    // Set topology as tree
-    ESP_ERROR_CHECK(esp_mesh_set_topology(MESH_TOPO_TREE));
-
-    // Set self-organized mode (no external router)
-    ESP_ERROR_CHECK(esp_mesh_set_self_organized(true, false));
-
-    // Allow or disallow this node to become root
-    ESP_ERROR_CHECK(esp_mesh_set_vote_percentage(config->allow_root ? 1.0 : 0.0));
 
     // Calculate this node's subnet ID from MAC address
     uint8_t mac[6];
@@ -353,13 +283,49 @@ esp_err_t geogram_mesh_start(const geogram_mesh_config_t *config)
     s_subnet_id = calculate_subnet_id(mac);
     ESP_LOGI(TAG, "This node's subnet ID: %d (192.168.%d.0/24)", s_subnet_id, 10 + s_subnet_id);
 
-    // Start mesh
-    ESP_ERROR_CHECK(esp_mesh_start());
+    // Register mesh-lite event handler
+    esp_err_t ret = esp_event_handler_instance_register(
+        ESP_MESH_LITE_EVENT, ESP_EVENT_ANY_ID, &mesh_lite_event_handler, NULL, NULL);
+    if (ret != ESP_OK && ret != ESP_ERR_INVALID_STATE) {
+        ESP_LOGE(TAG, "[START] Failed to register mesh-lite event handler: %s", esp_err_to_name(ret));
+        return ret;
+    }
+
+    // Configure ESP-Mesh-Lite using the default config from Kconfig
+    esp_mesh_lite_config_t mesh_lite_config = ESP_MESH_LITE_DEFAULT_INIT();
+
+    // Initialize mesh-lite (returns void)
+    esp_mesh_lite_init(&mesh_lite_config);
+    ESP_LOGI(TAG, "[START] Mesh-lite initialized");
+
+    // Configure root/node behavior based on allow_root setting
+    // For router-less single-node setup, we force this node to be root only
+    if (config->allow_root) {
+        // Force this node to be root (level 1 only)
+        // Disallow all child levels so it doesn't try to find a parent
+        esp_mesh_lite_set_allowed_level(1);
+        for (int level = 2; level <= s_max_layer; level++) {
+            esp_mesh_lite_set_disallowed_level(level);
+        }
+        ESP_LOGI(TAG, "[START] Node forced to be ROOT ONLY (level 1)");
+    } else {
+        // This node can only be a child, not root
+        esp_mesh_lite_set_disallowed_level(1);
+        // Allow all child levels up to max
+        for (int level = 2; level <= s_max_layer; level++) {
+            esp_mesh_lite_set_allowed_level(level);
+        }
+        ESP_LOGI(TAG, "[START] Node set as CHILD ONLY (levels 2-%d)", s_max_layer);
+    }
+
+    // Start mesh-lite (returns void)
+    esp_mesh_lite_start();
+    ESP_LOGI(TAG, "[START] Mesh-lite started");
 
     s_started = true;
     s_status = GEOGRAM_MESH_STATUS_STARTED;
 
-    ESP_LOGI(TAG, "Mesh started, scanning for network...");
+    ESP_LOGI(TAG, "Mesh-lite started, scanning for network...");
 
     return ESP_OK;
 }
@@ -370,39 +336,19 @@ esp_err_t geogram_mesh_stop(void)
         return ESP_OK;
     }
 
-    ESP_LOGI(TAG, "Stopping mesh network");
+    ESP_LOGI(TAG, "Stopping mesh-lite network");
 
     // Stop external AP if running
     geogram_mesh_stop_external_ap();
 
-    // Stop receive task - signal and wait for clean exit
-    if (s_rx_task) {
-        ESP_LOGI(TAG, "[STOP] Signaling RX task to stop...");
-        s_rx_task_running = false;
-
-        // Wait up to 6 seconds for task to exit (slightly longer than recv timeout)
-        // The task will exit on next timeout cycle
-        for (int i = 0; i < 60; i++) {
-            vTaskDelay(pdMS_TO_TICKS(100));
-            // Check if task has been deleted (eDeleted state)
-            eTaskState state = eTaskGetState(s_rx_task);
-            if (state == eDeleted) {
-                ESP_LOGI(TAG, "[STOP] RX task exited cleanly");
-                break;
-            }
-        }
-        s_rx_task = NULL;
-    }
-
-    // Stop mesh
-    esp_mesh_stop();
+    // Note: esp_mesh_lite doesn't have a stop function
+    // The mesh will be stopped when WiFi is stopped
 
     s_started = false;
     s_status = GEOGRAM_MESH_STATUS_STOPPED;
     s_is_root = false;
     s_layer = 0;
     s_has_parent = false;
-    s_route_table_size = 0;
 
     if (s_event_callback) {
         s_event_callback(GEOGRAM_MESH_EVENT_STOPPED, NULL);
@@ -447,12 +393,12 @@ esp_err_t geogram_mesh_get_parent_mac(uint8_t *mac)
     if (!mac) return ESP_ERR_INVALID_ARG;
     if (!s_has_parent) return ESP_ERR_NOT_FOUND;
 
-    memcpy(mac, s_parent_mac.addr, 6);
+    memcpy(mac, s_parent_mac, 6);
     return ESP_OK;
 }
 
 // ============================================================================
-// External SoftAP
+// External SoftAP (for phones)
 // ============================================================================
 
 esp_err_t geogram_mesh_start_external_ap(const char *ssid, const char *password,
@@ -470,55 +416,20 @@ esp_err_t geogram_mesh_start_external_ap(const char *ssid, const char *password,
 
     ESP_LOGI(TAG, "Starting external AP: %s", ssid);
 
-    // Use the existing mesh AP netif (WIFI_AP_DEF) for external clients
-    // In ESP-MESH, external clients connect through the mesh AP interface
-    if (!s_external_netif) {
-        s_external_netif = esp_netif_get_handle_from_ifkey("WIFI_AP_DEF");
-        if (!s_external_netif) {
-            ESP_LOGE(TAG, "Failed to get mesh AP netif");
-            return ESP_FAIL;
-        }
-    }
-
-    // Use the mesh AP's default subnet (192.168.4.x)
-    // Reconfiguring IP would break mesh AP functionality
-
-    ESP_LOGI(TAG, "Configuring mesh AP for external clients (SSID: %s)", ssid);
+    // In ESP-Mesh-Lite, each node has its own LWIP stack and can directly
+    // serve external clients on its AP interface. The bridge component
+    // handles the SoftAP configuration via Kconfig (CONFIG_BRIDGE_SOFTAP_*).
 
     // Store SSID for status queries
     strncpy(s_external_ap_ssid, ssid, sizeof(s_external_ap_ssid) - 1);
     s_external_ap_ssid[sizeof(s_external_ap_ssid) - 1] = '\0';
 
-    // Configure the external AP using mesh's mechanism
-    mesh_cfg_t mesh_cfg;
-    esp_mesh_get_config(&mesh_cfg);
-    mesh_cfg.mesh_ap.nonmesh_max_connection = max_connections;
-    esp_mesh_set_config(&mesh_cfg);
-
-    // Set AP SSID via WiFi config - must be done AFTER mesh is configured
-    // This allows us to have a custom SSID like "geogram" instead of mesh's auto-generated SSID
-    wifi_config_t wifi_config = {0};
-    strncpy((char *)wifi_config.ap.ssid, ssid, sizeof(wifi_config.ap.ssid) - 1);
-    wifi_config.ap.ssid_len = strlen(ssid);
-    wifi_config.ap.channel = s_channel;
-    wifi_config.ap.max_connection = max_connections;
-    wifi_config.ap.authmode = WIFI_AUTH_OPEN;
-    wifi_config.ap.ssid_hidden = 0;  // Ensure SSID is broadcast
-    wifi_config.ap.beacon_interval = 100;
-    esp_err_t ret = esp_wifi_set_config(WIFI_IF_AP, &wifi_config);
-    if (ret != ESP_OK) {
-        ESP_LOGW(TAG, "esp_wifi_set_config failed: %s (AP may use mesh SSID)", esp_err_to_name(ret));
-    } else {
-        ESP_LOGI(TAG, "AP SSID set to: %s", ssid);
-    }
-
-    // Allow non-mesh stations on the mesh AP
-    ESP_ERROR_CHECK(esp_mesh_allow_root_conflicts(false));
-
     s_external_ap_running = true;
     s_external_ap_clients = 0;
 
-    ESP_LOGI(TAG, "External AP started: %s (192.168.4.1)", ssid);
+    // The SoftAP is already configured by the bridge component
+    // Phones can connect to the SSID configured in Kconfig (CONFIG_BRIDGE_SOFTAP_SSID)
+    ESP_LOGI(TAG, "External AP enabled (using bridge SoftAP)");
 
     return ESP_OK;
 }
@@ -530,12 +441,6 @@ esp_err_t geogram_mesh_stop_external_ap(void)
     }
 
     ESP_LOGI(TAG, "Stopping external AP");
-
-    // Disable non-mesh connections
-    mesh_cfg_t mesh_cfg;
-    esp_mesh_get_config(&mesh_cfg);
-    mesh_cfg.mesh_ap.nonmesh_max_connection = 0;
-    esp_mesh_set_config(&mesh_cfg);
 
     s_external_ap_running = false;
     s_external_ap_clients = 0;
@@ -555,7 +460,6 @@ esp_err_t geogram_mesh_get_external_ap_ip(char *ip_str, size_t len)
     if (!ip_str || len < 16) return ESP_ERR_INVALID_ARG;
     if (!s_external_ap_running) return ESP_ERR_INVALID_STATE;
 
-    // Use mesh AP's default subnet
     snprintf(ip_str, len, "192.168.4.1");
     return ESP_OK;
 }
@@ -565,7 +469,6 @@ esp_err_t geogram_mesh_get_external_ap_ip_addr(uint32_t *ip)
     if (!ip) return ESP_ERR_INVALID_ARG;
     if (!s_external_ap_running) return ESP_ERR_INVALID_STATE;
 
-    // Use mesh AP's default subnet
     ip4_addr_t addr;
     IP4_ADDR(&addr, 192, 168, 4, 1);
     *ip = addr.addr;
@@ -586,16 +489,18 @@ esp_err_t geogram_mesh_get_nodes(geogram_mesh_node_t *nodes, size_t max_nodes,
 {
     if (!nodes || !node_count) return ESP_ERR_INVALID_ARG;
 
-    update_route_table();
-
+    // In ESP-Mesh-Lite, we can get node info from the mesh-lite API
     size_t count = 0;
-    for (int i = 0; i < s_route_table_size && count < max_nodes; i++) {
-        memcpy(nodes[count].mac, s_route_table[i].addr, 6);
-        nodes[count].subnet_id = calculate_subnet_id(s_route_table[i].addr);
-        nodes[count].layer = 0;  // Would need to query each node for accurate layer
-        nodes[count].rssi = 0;   // Would need additional API
-        nodes[count].is_root = false;  // Would need to compare with root MAC
 
+    // Add self to the list
+    if (count < max_nodes) {
+        uint8_t mac[6];
+        esp_wifi_get_mac(WIFI_IF_STA, mac);
+        memcpy(nodes[count].mac, mac, 6);
+        nodes[count].subnet_id = s_subnet_id;
+        nodes[count].layer = s_layer;
+        nodes[count].rssi = 0;
+        nodes[count].is_root = s_is_root;
         count++;
     }
 
@@ -605,25 +510,24 @@ esp_err_t geogram_mesh_get_nodes(geogram_mesh_node_t *nodes, size_t max_nodes,
 
 size_t geogram_mesh_get_node_count(void)
 {
-    update_route_table();
-    return (size_t)s_route_table_size;
+    // Return at least 1 for self
+    return 1;
 }
 
 esp_err_t geogram_mesh_find_node_by_subnet(uint8_t subnet_id, geogram_mesh_node_t *node)
 {
     if (!node) return ESP_ERR_INVALID_ARG;
 
-    update_route_table();
-
-    for (int i = 0; i < s_route_table_size; i++) {
-        if (calculate_subnet_id(s_route_table[i].addr) == subnet_id) {
-            memcpy(node->mac, s_route_table[i].addr, 6);
-            node->subnet_id = subnet_id;
-            node->layer = 0;
-            node->rssi = 0;
-            node->is_root = false;
-            return ESP_OK;
-        }
+    // Check if it's our own subnet
+    if (subnet_id == s_subnet_id) {
+        uint8_t mac[6];
+        esp_wifi_get_mac(WIFI_IF_STA, mac);
+        memcpy(node->mac, mac, 6);
+        node->subnet_id = s_subnet_id;
+        node->layer = s_layer;
+        node->rssi = 0;
+        node->is_root = s_is_root;
+        return ESP_OK;
     }
 
     return ESP_ERR_NOT_FOUND;
@@ -647,17 +551,14 @@ esp_err_t geogram_mesh_send_to_node(const uint8_t *dest_mac, const void *data, s
     ESP_LOGI(TAG, "[TX] Sending %zu bytes to " MACSTR,
              len, MAC2STR(dest_mac));
 
-    mesh_addr_t dest;
-    memcpy(dest.addr, dest_mac, 6);
+    // Use ESP-Mesh-Lite's ESP-NOW based messaging
+    esp_err_t ret = esp_mesh_lite_espnow_send(
+        ESPNOW_DATA_TYPE_RM_GROUP_CONTROL,
+        (uint8_t *)dest_mac,
+        (const uint8_t *)data,
+        len
+    );
 
-    mesh_data_t mesh_data = {
-        .data = (uint8_t *)data,
-        .size = (uint16_t)len,
-        .proto = MESH_PROTO_BIN,
-        .tos = MESH_TOS_P2P
-    };
-
-    esp_err_t ret = esp_mesh_send(&dest, &mesh_data, MESH_DATA_P2P, NULL, 0);
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "[TX] FAILED: %s", esp_err_to_name(ret));
     } else {
@@ -682,7 +583,7 @@ esp_err_t geogram_mesh_save_config(void)
     esp_err_t ret = nvs_open(MESH_NVS_NAMESPACE, NVS_READWRITE, &nvs);
     if (ret != ESP_OK) return ret;
 
-    nvs_set_blob(nvs, "mesh_id", &s_mesh_id, 6);
+    nvs_set_blob(nvs, "mesh_id", s_mesh_id, 6);
     nvs_set_u8(nvs, "channel", s_channel);
     nvs_set_u8(nvs, "max_layer", s_max_layer);
 
@@ -716,53 +617,41 @@ esp_err_t geogram_mesh_load_config(geogram_mesh_config_t *config)
 // Event Handlers
 // ============================================================================
 
-static void mesh_event_handler(void *arg, esp_event_base_t event_base,
-                               int32_t event_id, void *event_data)
+static void mesh_lite_event_handler(void *arg, esp_event_base_t base,
+                                    int32_t event_id, void *data)
 {
     switch (event_id) {
-        case MESH_EVENT_STARTED:
-            ESP_LOGI(TAG, "[EVENT] *** MESH STARTED ***");
-            ESP_LOGI(TAG, "[EVENT] Scanning for mesh network...");
+        case ESP_MESH_LITE_EVENT_CORE_STARTED:
+            ESP_LOGI(TAG, "[EVENT] *** MESH-LITE STARTED ***");
             s_status = GEOGRAM_MESH_STATUS_STARTED;
             if (s_event_callback) {
                 s_event_callback(GEOGRAM_MESH_EVENT_STARTED, NULL);
             }
             break;
 
-        case MESH_EVENT_STOPPED:
-            ESP_LOGI(TAG, "[EVENT] *** MESH STOPPED ***");
-            s_status = GEOGRAM_MESH_STATUS_STOPPED;
-            s_is_root = false;
-            s_layer = 0;
-            if (s_event_callback) {
-                s_event_callback(GEOGRAM_MESH_EVENT_STOPPED, NULL);
-            }
+        case ESP_MESH_LITE_EVENT_CORE_INHERITED_NET_SEGMENT_CHANGED:
+            ESP_LOGI(TAG, "[EVENT] Network segment changed");
             break;
 
-        case MESH_EVENT_PARENT_CONNECTED: {
-            mesh_event_connected_t *connected = (mesh_event_connected_t *)event_data;
-            s_layer = esp_mesh_get_layer();
-            s_is_root = esp_mesh_is_root();
-            memcpy(&s_parent_mac, &connected->connected.bssid, 6);
-            s_has_parent = true;
+        case ESP_MESH_LITE_EVENT_CORE_ROUTER_INFO_CHANGED:
+            ESP_LOGI(TAG, "[EVENT] Router info changed");
+            break;
 
+        case ESP_MESH_LITE_EVENT_NODE_JOIN: {
             ESP_LOGI(TAG, "========================================");
-            ESP_LOGI(TAG, "[EVENT] *** CONNECTED TO MESH ***");
-            ESP_LOGI(TAG, "[EVENT] Layer: %d", s_layer);
+            ESP_LOGI(TAG, "[EVENT] *** NODE JOINED MESH ***");
+
+            // Get current level
+            s_layer = esp_mesh_lite_get_level();
+            s_is_root = (s_layer == 1);
+
+            ESP_LOGI(TAG, "[EVENT] Level: %d", s_layer);
             ESP_LOGI(TAG, "[EVENT] Is Root: %s", s_is_root ? "YES" : "NO");
-            ESP_LOGI(TAG, "[EVENT] Parent MAC: " MACSTR, MAC2STR(s_parent_mac.addr));
             ESP_LOGI(TAG, "[EVENT] Subnet: 192.168.%d.0/24", 10 + s_subnet_id);
             ESP_LOGI(TAG, "========================================");
 
             s_status = s_is_root ? GEOGRAM_MESH_STATUS_ROOT : GEOGRAM_MESH_STATUS_CONNECTED;
-
-            // Start receive task if not running
-            if (!s_rx_task) {
-                ESP_LOGI(TAG, "[EVENT] Starting mesh RX task...");
-                s_rx_task_running = true;
-                // 6144 bytes stack for ESP32-C3 safety (handles 1500-byte packets)
-                xTaskCreate(mesh_rx_task, "mesh_rx", 6144, NULL, 5, &s_rx_task);
-            }
+            s_has_parent = !s_is_root;
 
             if (s_event_callback) {
                 s_event_callback(GEOGRAM_MESH_EVENT_CONNECTED, NULL);
@@ -770,20 +659,9 @@ static void mesh_event_handler(void *arg, esp_event_base_t event_base,
             break;
         }
 
-        case MESH_EVENT_PARENT_DISCONNECTED: {
-            mesh_event_disconnected_t *disconnected = (mesh_event_disconnected_t *)event_data;
-
-            // For standalone root nodes (no router), ignore parent disconnect events
-            // Root nodes don't have a parent, so these events are spurious
-            if (s_is_root && s_status == GEOGRAM_MESH_STATUS_ROOT) {
-                ESP_LOGD(TAG, "[EVENT] Ignoring parent disconnect for standalone root (reason: %d)",
-                         disconnected->reason);
-                break;
-            }
-
+        case ESP_MESH_LITE_EVENT_NODE_LEAVE:
             ESP_LOGW(TAG, "========================================");
-            ESP_LOGW(TAG, "[EVENT] *** PARENT DISCONNECTED ***");
-            ESP_LOGW(TAG, "[EVENT] Reason: %d", disconnected->reason);
+            ESP_LOGW(TAG, "[EVENT] *** NODE LEFT MESH ***");
             ESP_LOGW(TAG, "========================================");
 
             s_status = GEOGRAM_MESH_STATUS_DISCONNECTED;
@@ -794,150 +672,44 @@ static void mesh_event_handler(void *arg, esp_event_base_t event_base,
                 s_event_callback(GEOGRAM_MESH_EVENT_DISCONNECTED, NULL);
             }
             break;
-        }
 
-        case MESH_EVENT_CHILD_CONNECTED: {
-            mesh_event_child_connected_t *child = (mesh_event_child_connected_t *)event_data;
-            ESP_LOGI(TAG, "[EVENT] Child node connected: " MACSTR, MAC2STR(child->mac));
+        case ESP_MESH_LITE_EVENT_NODE_CHANGE: {
+            ESP_LOGI(TAG, "[EVENT] Topology changed");
 
-            update_route_table();
-            ESP_LOGI(TAG, "[EVENT] Route table now has %d nodes", s_route_table_size);
+            // Update level info
+            uint8_t new_layer = esp_mesh_lite_get_level();
+            bool new_is_root = (new_layer == 1);
 
-            if (s_event_callback) {
-                s_event_callback(GEOGRAM_MESH_EVENT_CHILD_CONNECTED, child);
-            }
-            break;
-        }
+            if (new_layer != s_layer || new_is_root != s_is_root) {
+                s_layer = new_layer;
+                s_is_root = new_is_root;
+                s_status = s_is_root ? GEOGRAM_MESH_STATUS_ROOT : GEOGRAM_MESH_STATUS_CONNECTED;
 
-        case MESH_EVENT_CHILD_DISCONNECTED: {
-            mesh_event_child_disconnected_t *child = (mesh_event_child_disconnected_t *)event_data;
-            ESP_LOGW(TAG, "[EVENT] Child node disconnected: " MACSTR, MAC2STR(child->mac));
-
-            update_route_table();
-            ESP_LOGI(TAG, "[EVENT] Route table now has %d nodes", s_route_table_size);
-
-            if (s_event_callback) {
-                s_event_callback(GEOGRAM_MESH_EVENT_CHILD_DISCONNECTED, child);
-            }
-            break;
-        }
-
-        case MESH_EVENT_ROOT_SWITCH_REQ:
-            ESP_LOGI(TAG, "[EVENT] Root switch requested");
-            break;
-
-        case MESH_EVENT_ROOT_SWITCH_ACK:
-            s_is_root = esp_mesh_is_root();
-            s_layer = esp_mesh_get_layer();
-            s_status = s_is_root ? GEOGRAM_MESH_STATUS_ROOT : GEOGRAM_MESH_STATUS_CONNECTED;
-
-            ESP_LOGI(TAG, "========================================");
-            ESP_LOGI(TAG, "[EVENT] *** ROOT STATUS CHANGED ***");
-            ESP_LOGI(TAG, "[EVENT] Is Root: %s", s_is_root ? "YES" : "NO");
-            ESP_LOGI(TAG, "[EVENT] Layer: %d", s_layer);
-            ESP_LOGI(TAG, "========================================");
-
-            if (s_event_callback) {
-                s_event_callback(GEOGRAM_MESH_EVENT_ROOT_CHANGED, NULL);
-            }
-            break;
-
-        // MESH_EVENT_ROOT_GOT_IP and MESH_EVENT_ROOT_LOST_IP were removed in ESP-IDF v5
-        // IP events for the mesh root are handled via IP_EVENT_STA_GOT_IP
-
-        case MESH_EVENT_ROUTING_TABLE_ADD:
-            ESP_LOGD(TAG, "[EVENT] Routing table: node added");
-            update_route_table();
-            if (s_event_callback) {
-                s_event_callback(GEOGRAM_MESH_EVENT_ROUTE_TABLE_CHANGE, NULL);
-            }
-            break;
-
-        case MESH_EVENT_ROUTING_TABLE_REMOVE:
-            ESP_LOGD(TAG, "[EVENT] Routing table: node removed");
-            update_route_table();
-            if (s_event_callback) {
-                s_event_callback(GEOGRAM_MESH_EVENT_ROUTE_TABLE_CHANGE, NULL);
-            }
-            break;
-
-        case MESH_EVENT_NO_PARENT_FOUND: {
-            ESP_LOGI(TAG, "[EVENT] No parent found - becoming root");
-            // Force this node to become root since no network exists
-            esp_err_t err = esp_mesh_set_type(MESH_ROOT);
-            if (err == ESP_OK) {
-                // Root has no parent, so PARENT_CONNECTED won't fire
-                // Manually set state and trigger callback
-                s_is_root = true;
-                s_layer = 1;
-                s_status = GEOGRAM_MESH_STATUS_ROOT;
-                ESP_LOGI(TAG, "[EVENT] Now operating as ROOT node");
-
-                // Disable self-organization to stop mesh from reconfiguring the AP
-                // This allows our custom SSID and settings to persist
-                esp_mesh_set_self_organized(false, false);
-                ESP_LOGI(TAG, "[EVENT] Disabled mesh self-organization for stable AP");
+                ESP_LOGI(TAG, "[EVENT] New level: %d, is_root: %s",
+                         s_layer, s_is_root ? "YES" : "NO");
 
                 if (s_event_callback) {
-                    s_event_callback(GEOGRAM_MESH_EVENT_CONNECTED, NULL);
+                    s_event_callback(GEOGRAM_MESH_EVENT_ROOT_CHANGED, NULL);
                 }
-            } else {
-                ESP_LOGE(TAG, "Failed to set as root: %s", esp_err_to_name(err));
             }
             break;
         }
 
-        case MESH_EVENT_LAYER_CHANGE:
-            s_layer = esp_mesh_get_layer();
-            ESP_LOGI(TAG, "[EVENT] Layer changed to %d", s_layer);
-            break;
-
-        case MESH_EVENT_SCAN_DONE:
-            ESP_LOGD(TAG, "[EVENT] Network scan completed");
-            break;
-
         default:
-            ESP_LOGD(TAG, "[EVENT] Unhandled mesh event: %ld", event_id);
+            ESP_LOGD(TAG, "[EVENT] Unhandled mesh-lite event: %ld", event_id);
             break;
     }
 }
 
-static void ip_event_handler(void *arg, esp_event_base_t event_base,
-                             int32_t event_id, void *event_data)
-{
-    switch (event_id) {
-        case IP_EVENT_AP_STAIPASSIGNED: {
-            ip_event_ap_staipassigned_t *event = (ip_event_ap_staipassigned_t *)event_data;
-            ESP_LOGI(TAG, "Phone connected to external AP, IP: " IPSTR,
-                     IP2STR(&event->ip));
-            s_external_ap_clients++;
-
-            if (s_event_callback) {
-                geogram_mesh_external_sta_t sta = {0};
-                memcpy(sta.mac, event->mac, 6);
-                sta.ip = event->ip.addr;
-                s_event_callback(GEOGRAM_MESH_EVENT_EXTERNAL_STA_CONNECTED, &sta);
-            }
-            break;
-        }
-
-        case IP_EVENT_STA_LOST_IP:
-            ESP_LOGW(TAG, "Lost STA IP");
-            break;
-
-        default:
-            break;
-    }
-}
-
-static void wifi_ap_event_handler(void *arg, esp_event_base_t event_base,
-                                  int32_t event_id, void *event_data)
+static void wifi_event_handler(void *arg, esp_event_base_t event_base,
+                               int32_t event_id, void *event_data)
 {
     switch (event_id) {
         case WIFI_EVENT_AP_STACONNECTED: {
             wifi_event_ap_staconnected_t *event = (wifi_event_ap_staconnected_t *)event_data;
             ESP_LOGI(TAG, "[AP] Station connected: " MACSTR " (AID=%d)",
                      MAC2STR(event->mac), event->aid);
+            s_external_ap_clients++;
             break;
         }
 
@@ -951,83 +723,55 @@ static void wifi_ap_event_handler(void *arg, esp_event_base_t event_base,
             break;
         }
 
+        case WIFI_EVENT_STA_CONNECTED:
+            ESP_LOGI(TAG, "[STA] Connected to parent AP");
+            break;
+
+        case WIFI_EVENT_STA_DISCONNECTED:
+            ESP_LOGW(TAG, "[STA] Disconnected from parent AP");
+            break;
+
+        default:
+            break;
+    }
+}
+
+static void ip_event_handler(void *arg, esp_event_base_t event_base,
+                             int32_t event_id, void *event_data)
+{
+    switch (event_id) {
+        case IP_EVENT_AP_STAIPASSIGNED: {
+            ip_event_ap_staipassigned_t *event = (ip_event_ap_staipassigned_t *)event_data;
+            ESP_LOGI(TAG, "Phone connected to AP, IP: " IPSTR,
+                     IP2STR(&event->ip));
+
+            if (s_event_callback) {
+                geogram_mesh_external_sta_t sta = {0};
+                memcpy(sta.mac, event->mac, 6);
+                sta.ip = event->ip.addr;
+                s_event_callback(GEOGRAM_MESH_EVENT_EXTERNAL_STA_CONNECTED, &sta);
+            }
+            break;
+        }
+
+        case IP_EVENT_STA_GOT_IP: {
+            ip_event_got_ip_t *event = (ip_event_got_ip_t *)event_data;
+            ESP_LOGI(TAG, "[STA] Got IP: " IPSTR, IP2STR(&event->ip_info.ip));
+            break;
+        }
+
+        case IP_EVENT_STA_LOST_IP:
+            ESP_LOGW(TAG, "[STA] Lost IP");
+            break;
+
         default:
             break;
     }
 }
 
 // ============================================================================
-// Receive Task
-// ============================================================================
-
-static void mesh_rx_task(void *arg)
-{
-    ESP_LOGI(TAG, "[RX] Mesh receive task started");
-    ESP_LOGI(TAG, "[RX] Waiting for incoming mesh data...");
-
-    mesh_addr_t from;
-    mesh_data_t data;
-    int flag = 0;
-
-    // Allocate receive buffer
-    uint8_t *rx_buf = malloc(1500);
-    if (!rx_buf) {
-        ESP_LOGE(TAG, "[RX] Failed to allocate RX buffer");
-        s_rx_task_running = false;
-        vTaskDelete(NULL);
-        return;
-    }
-
-    uint32_t rx_count = 0;
-
-    while (s_rx_task_running) {
-        data.data = rx_buf;
-        data.size = 1500;
-
-        // Use 5 second timeout instead of portMAX_DELAY to prevent watchdog issues
-        esp_err_t ret = esp_mesh_recv(&from, &data, pdMS_TO_TICKS(5000), &flag, NULL, 0);
-        if (ret == ESP_ERR_MESH_TIMEOUT) {
-            // Normal timeout, just continue to check s_rx_task_running flag
-            continue;
-        }
-        if (ret == ESP_OK && data.size > 0) {
-            rx_count++;
-            ESP_LOGI(TAG, "[RX] ========================================");
-            ESP_LOGI(TAG, "[RX] Packet #%lu received", (unsigned long)rx_count);
-            ESP_LOGI(TAG, "[RX] From: " MACSTR, MAC2STR(from.addr));
-            ESP_LOGI(TAG, "[RX] Size: %d bytes", data.size);
-            ESP_LOGI(TAG, "[RX] Flag: 0x%02x", flag);
-
-            if (s_data_callback) {
-                ESP_LOGD(TAG, "[RX] Invoking data callback...");
-                s_data_callback(from.addr, data.data, data.size);
-            } else {
-                ESP_LOGW(TAG, "[RX] No data callback registered!");
-            }
-            ESP_LOGI(TAG, "[RX] ========================================");
-        } else if (ret != ESP_OK) {
-            ESP_LOGW(TAG, "[RX] Receive error: %s", esp_err_to_name(ret));
-        }
-    }
-
-    free(rx_buf);
-    ESP_LOGI(TAG, "[RX] Mesh receive task stopped (total packets: %lu)", (unsigned long)rx_count);
-    vTaskDelete(NULL);
-}
-
-// ============================================================================
 // Helper Functions
 // ============================================================================
-
-static void update_route_table(void)
-{
-    s_route_table_size = esp_mesh_get_routing_table(
-        (mesh_addr_t *)s_route_table,
-        CONFIG_GEOGRAM_MESH_ROUTE_TABLE_SIZE * 6,
-        &s_route_table_size);
-
-    ESP_LOGD(TAG, "Route table updated: %d nodes", s_route_table_size);
-}
 
 static uint8_t calculate_subnet_id(const uint8_t *mac)
 {

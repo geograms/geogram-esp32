@@ -1,14 +1,16 @@
 menu "Geogram Mesh Networking"
 
     config GEOGRAM_MESH_ENABLED
-        bool "Enable ESP-MESH support"
+        bool "Enable ESP-Mesh-Lite support"
+        default y if IDF_TARGET_ESP32C3
         default n
         depends on IDF_TARGET_ESP32 || IDF_TARGET_ESP32S2 || IDF_TARGET_ESP32S3 || IDF_TARGET_ESP32C3
         help
-            Enable ESP-MESH protocol for multi-node mesh networks.
-            When enabled, devices can form a self-organizing mesh network
-            and bridge IP traffic between phones connected to different nodes.
-            ESP32-C3 is supported with reduced memory limits (see Kconfig options).
+            Enable ESP-Mesh-Lite protocol for multi-node mesh networks.
+            ESP-Mesh-Lite provides native SoftAP support per node, allowing
+            phones/laptops to connect directly without requiring a router.
+            ESP32-C3 is supported with reduced memory limits.
+            Requires CONFIG_MESH_LITE_ENABLE=y in sdkconfig.
 
     config GEOGRAM_MESH_CHANNEL
         int "Mesh WiFi Channel"
@@ -23,22 +25,12 @@ menu "Geogram Mesh Networking"
         int "Maximum mesh tree depth"
         default 3 if IDF_TARGET_ESP32C3
         default 6
-        range 2 25
+        range 2 15
         depends on GEOGRAM_MESH_ENABLED
         help
-            Maximum depth of the mesh tree topology. Root node is layer 1.
+            Maximum depth of the mesh tree topology. Root node is level 1.
             Larger values allow more nodes but increase latency.
             Default is 3 for ESP32-C3 (limited SRAM), 6 for other chips.
-
-    config GEOGRAM_MESH_ROUTE_TABLE_SIZE
-        int "Route table size"
-        default 20 if IDF_TARGET_ESP32C3
-        default 50
-        range 10 300
-        depends on GEOGRAM_MESH_ENABLED
-        help
-            Maximum number of nodes in the routing table.
-            Default is 20 for ESP32-C3 (limited SRAM), 50 for other chips.
 
     config GEOGRAM_MESH_EXTERNAL_AP_MAX_CONN
         int "Max phone connections per node"
@@ -49,36 +41,5 @@ menu "Geogram Mesh Networking"
         help
             Maximum number of phones that can connect to each node's SoftAP.
             Default is 2 for ESP32-C3 (limited SRAM), 4 for other chips.
-
-    config GEOGRAM_MESH_AP_AUTHMODE
-        int "External AP authentication mode"
-        default 0
-        range 0 4
-        depends on GEOGRAM_MESH_ENABLED
-        help
-            Authentication mode for the external SoftAP:
-            0 = Open (no password)
-            1 = WEP
-            2 = WPA_PSK
-            3 = WPA2_PSK
-            4 = WPA_WPA2_PSK
-
-    config GEOGRAM_MESH_BRIDGE_BUFFER_SIZE
-        int "Bridge packet buffer size"
-        default 1500
-        range 576 2048
-        depends on GEOGRAM_MESH_ENABLED
-        help
-            Maximum size of IP packets that can be bridged.
-            Standard Ethernet MTU is 1500.
-
-    config GEOGRAM_MESH_BRIDGE_QUEUE_SIZE
-        int "Bridge packet queue size"
-        default 8
-        range 4 32
-        depends on GEOGRAM_MESH_ENABLED
-        help
-            Number of packets that can be queued for bridging.
-            Larger values improve throughput but use more memory.
 
 endmenu

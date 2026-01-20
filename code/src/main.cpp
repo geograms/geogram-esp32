@@ -35,6 +35,8 @@
 // Mesh networking (optional, enabled via CONFIG_GEOGRAM_MESH_ENABLED)
 #ifdef CONFIG_GEOGRAM_MESH_ENABLED
 #include "mesh_bsp.h"
+#include "esp_netif.h"
+#include "lwip/ip4_addr.h"
 #endif
 
 // Include board-specific model initialization
@@ -81,6 +83,7 @@ static const char *TAG = "geogram";
 static bool s_mesh_mode = false;
 static bool s_mesh_connected = false;
 static bool s_mesh_services_started = false;
+static bool s_http_server_started = false;  // Track if HTTP server started early
 
 static void start_mesh_services(void)
 {
@@ -97,9 +100,15 @@ static void start_mesh_services(void)
         dns_server_start(ap_ip);
     }
 
-    station_init();
-    http_server_start_ex(NULL, true);
-    ESP_LOGI(TAG, "Station API started on mesh node");
+    // Only start HTTP server if not already started early
+    if (!s_http_server_started) {
+        station_init();
+        http_server_start_ex(NULL, true);
+        s_http_server_started = true;
+        ESP_LOGI(TAG, "Station API started on mesh node");
+    } else {
+        ESP_LOGI(TAG, "HTTP server already running (started early)");
+    }
 
     if (telnet_server_start(TELNET_DEFAULT_PORT) == ESP_OK) {
         ESP_LOGI(TAG, "Telnet server started on port %d", TELNET_DEFAULT_PORT);
@@ -146,6 +155,7 @@ static void mesh_event_cb(geogram_mesh_event_t event, void *event_data)
             // Stop services
             telnet_server_stop();
             http_server_stop();
+            s_http_server_started = false;
             geogram_mesh_disable_bridge();
             geogram_mesh_stop_external_ap();
             s_mesh_services_started = false;
@@ -209,7 +219,30 @@ static void start_mesh_mode(void)
 
     s_mesh_mode = true;
     ESP_LOGI(TAG, "Mesh mode started, scanning for network...");
-    // External AP will be started when mesh connects (in mesh_event_cb)
+
+    // Start HTTP server immediately for SoftAP clients
+    // (Don't wait for mesh NODE_JOIN event which may never fire for root-only nodes)
+    station_init();
+
+    // Log the SoftAP IP for debugging
+    esp_netif_t *ap_netif = esp_netif_get_handle_from_ifkey("WIFI_AP_DEF");
+    if (ap_netif) {
+        esp_netif_ip_info_t ip_info;
+        if (esp_netif_get_ip_info(ap_netif, &ip_info) == ESP_OK) {
+            ESP_LOGI(TAG, "SoftAP IP: " IPSTR ", Gateway: " IPSTR,
+                     IP2STR(&ip_info.ip), IP2STR(&ip_info.gw));
+        }
+    } else {
+        ESP_LOGW(TAG, "Could not get SoftAP netif handle");
+    }
+
+    esp_err_t http_ret = http_server_start_ex(NULL, true);
+    if (http_ret == ESP_OK) {
+        s_http_server_started = true;
+        ESP_LOGI(TAG, "HTTP server started for SoftAP clients");
+    } else {
+        ESP_LOGE(TAG, "Failed to start HTTP server: %s", esp_err_to_name(http_ret));
+    }
 }
 #endif  // CONFIG_GEOGRAM_MESH_ENABLED
 

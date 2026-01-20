@@ -640,11 +640,15 @@ size_t mesh_chat_build_json(char *buffer, size_t size, uint32_t since_id)
         return 0;
     }
 
-    mesh_chat_message_t *messages = malloc(sizeof(mesh_chat_message_t) * MESH_CHAT_HISTORY_SIZE);
+    // Limit batch size to reduce memory usage (especially on ESP32-C3)
+    const size_t max_batch = 20;
+    mesh_chat_message_t *messages = malloc(sizeof(mesh_chat_message_t) * max_batch);
     if (!messages) {
+        ESP_LOGE("mesh_chat", "Failed to alloc messages, free heap: %lu",
+                 (unsigned long)esp_get_free_heap_size());
         return 0;
     }
-    size_t count = mesh_chat_get_history(messages, MESH_CHAT_HISTORY_SIZE, since_id);
+    size_t count = mesh_chat_get_history(messages, max_batch, since_id);
 
     // Get local callsign for identification
     extern const char *nostr_keys_get_callsign(void);

@@ -26,6 +26,10 @@ if(MESH_SUPPORTED)
         freertos
         lwip
         esp_timer
+        json
+        app_update
+        espressif__iot_bridge
+        espressif__mesh_lite
     )
 
     idf_component_register(

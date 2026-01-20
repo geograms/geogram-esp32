@@ -362,7 +362,7 @@ static const char *LANDING_PAGE_HTML_SUFFIX =
     "function formatSize(bytes){if(!bytes&&bytes!==0)return'';const units=['B','KB','MB','GB'];let n=bytes;let i=0;while(n>=1024&&i<units.length-1){n/=1024;i++;}return n.toFixed(i?1:0)+' '+units[i];}"
     "function render(m){"
     "const div=document.createElement('div');"
-    "div.className='msg '+(m.local?'local':'remote');"
+    "div.className='msg '+((clientKeys&&m.from===clientKeys.callsign)?'local':'remote');"
     "let body='';"
     "if(m.type==='file'&&m.file){"
     "const sha1=m.file.sha1||'';"
@@ -801,10 +801,13 @@ static esp_err_t api_chat_messages_get_handler(httpd_req_t *req)
     const char *callsign = station_get_callsign();
     if (!callsign) callsign = "NOCALL";
 
-    // Build response
-    const size_t buffer_size = 32768;
+    // Build response - use smaller buffer for ESP32-C3 memory constraints
+    const size_t buffer_size = 8192;
+    ESP_LOGI(TAG, "Free heap before chat alloc: %lu", (unsigned long)esp_get_free_heap_size());
     char *buffer = malloc(buffer_size);
     if (!buffer) {
+        ESP_LOGE(TAG, "Failed to allocate %d bytes, free heap: %lu",
+                 (int)buffer_size, (unsigned long)esp_get_free_heap_size());
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Out of memory");
         return ESP_FAIL;
     }
