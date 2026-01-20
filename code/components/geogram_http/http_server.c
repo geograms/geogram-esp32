@@ -8,11 +8,13 @@
 #include "http_server.h"
 #include "esp_http_server.h"
 #include "esp_log.h"
+#include "esp_timer.h"
 #include "nvs_flash.h"
 #include "nvs.h"
 #include "station.h"
 #include "ws_server.h"
 #include "app_config.h"
+#include "mbedtls/base64.h"
 
 #if BOARD_MODEL == MODEL_ESP32S3_EPAPER_1IN54
 #include "tiles.h"
@@ -32,6 +34,64 @@ static const char *TAG = "http_server";
 static httpd_handle_t s_server = NULL;
 static wifi_config_callback_t s_config_callback = NULL;
 static bool s_station_api_enabled = false;
+
+// File transfer relay state
+#define FILE_CHUNK_SIZE 16384  // 16KB chunks
+#define FILE_TRANSFER_TIMEOUT_MS 60000  // 60 second timeout
+
+typedef struct {
+    char sha1[41];              // File identifier (hex string)
+    char filename[65];          // Original filename
+    char mime[33];              // MIME type
+    size_t total_size;          // Total file size
+    int total_chunks;           // Total chunks expected
+    int current_chunk;          // Chunk currently in buffer
+    uint8_t *chunk_data;        // Points to s_chunk_buffer
+    size_t chunk_len;           // Actual bytes in buffer
+    bool chunk_delivered;       // Has receiver fetched this chunk?
+    int64_t last_activity;      // For timeout cleanup
+    bool active;                // Is there an active transfer?
+} file_transfer_t;
+
+static file_transfer_t s_transfer = {0};
+static uint8_t s_chunk_buffer[FILE_CHUNK_SIZE];
+
+/**
+ * @brief Escape a string for JSON (handles quotes, backslashes, control chars)
+ * @param dest Destination buffer (should be 2x src size + 1 for worst case)
+ * @param dest_size Size of destination buffer
+ * @param src Source string to escape
+ */
+static void json_escape_string(char *dest, size_t dest_size, const char *src)
+{
+    size_t di = 0;
+    for (size_t si = 0; src[si] && di < dest_size - 1; si++) {
+        char c = src[si];
+        if (c == '"' || c == '\\') {
+            if (di + 2 >= dest_size) break;
+            dest[di++] = '\\';
+            dest[di++] = c;
+        } else if (c == '\n') {
+            if (di + 2 >= dest_size) break;
+            dest[di++] = '\\';
+            dest[di++] = 'n';
+        } else if (c == '\r') {
+            if (di + 2 >= dest_size) break;
+            dest[di++] = '\\';
+            dest[di++] = 'r';
+        } else if (c == '\t') {
+            if (di + 2 >= dest_size) break;
+            dest[di++] = '\\';
+            dest[di++] = 't';
+        } else if ((unsigned char)c < 32) {
+            // Skip other control characters
+            continue;
+        } else {
+            dest[di++] = c;
+        }
+    }
+    dest[di] = '\0';
+}
 
 // HTML configuration page
 static const char *CONFIG_PAGE_HTML =
@@ -255,7 +315,6 @@ static const char *LANDING_PAGE_HTML_PREFIX =
     ".input-area input{flex:1;background:transparent;border:1px solid var(--border);border-radius:4px;padding:10px;color:var(--text);font-size:16px;outline:none}"
     ".input-area input:focus{border-color:var(--accent)}"
     ".input-area button{background:var(--accent);color:var(--bg);border:none;border-radius:4px;padding:10px 16px;font-weight:bold;cursor:pointer}"
-    ".attach-btn{background:transparent;color:var(--text);border:1px dashed var(--border);padding:10px 12px;font-weight:bold;border-radius:4px}"
     ".status-bar{border-top:1px solid var(--border);padding:6px 12px;font-size:10px;color:var(--muted);display:flex;justify-content:space-between}"
     "</style>"
     "</head>"
@@ -273,8 +332,6 @@ static const char *LANDING_PAGE_HTML_PREFIX =
     "<div class=\"chat\">"
     "<div class=\"messages\" id=\"messages\"></div>"
     "<div class=\"input-area\">"
-    "<button id=\"attach\" class=\"attach-btn\" title=\"Attach file\">+</button>"
-    "<input type=\"file\" id=\"file\" style=\"display:none\">"
     "<input type=\"text\" id=\"input\" placeholder=\"Type a message...\" maxlength=\"200\">"
     "<button id=\"send\">SEND</button>"
     "</div>"
@@ -447,7 +504,7 @@ static const char *LANDING_PAGE_HTML_SUFFIX =
     "const pf=pendingFile;"
     "const body='text='+encodeURIComponent(txt||'')+'&callsign='+(clientKeys?encodeURIComponent(clientKeys.callsign):'')+'&sha1='+encodeURIComponent(pf.sha1)+'&size='+pf.size+'&filename='+encodeURIComponent(pf.name||'')+'&mime='+encodeURIComponent(pf.mime||'');"
     "const r=await fetch('/api/chat/send-file',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:body});"
-    "if(r.ok){fileStore.set(pf.sha1,{file:pf.file,name:pf.name,size:pf.size,mime:pf.mime});pendingFile=null;$('file').value='';inp.value='';await load();}"
+    "if(r.ok){fileStore.set(pf.sha1,{file:pf.file,name:pf.name,size:pf.size,mime:pf.mime});await uploadFileHttp(pf.file,pf.sha1);pendingFile=null;$('file').value='';inp.value='';await load();}"
     "}else{"
     "const clientTs=Math.floor(Date.now()/1000);"
     "const iso=new Date(clientTs*1000).toISOString();"
@@ -470,13 +527,7 @@ static const char *LANDING_PAGE_HTML_SUFFIX =
     "$('send').disabled=false;inp.focus();}"
     "$('send').onclick=send;"
     "$('input').onkeypress=e=>{if(e.key==='Enter')send();};"
-    "$('attach').onclick=()=>{$('file').click();};"
-    "$('file').onchange=async e=>{const f=e.target.files&&e.target.files[0];if(!f)return;"
-    "if(f.size>MAX_FILE_BYTES){$('status').textContent='File too large (max 20MB)';$('file').value='';return;}"
-    "try{const sha1=await sha1Hex(f);"
-    "pendingFile={file:f,sha1:sha1,name:f.name,size:f.size,mime:f.type||''};"
-    "$('status').textContent='Ready to send '+f.name;}catch(err){$('status').textContent='File error';$('file').value='';}};"
-    "$('messages').onclick=e=>{const btn=e.target.closest('.file-action');if(!btn)return;"
+    "$('messages').onclick=async e=>{const btn=e.target.closest('.file-action');if(!btn)return;"
     "const sha1=btn.getAttribute('data-sha1');"
     "if(fileStore.has(sha1)){"
     "const entry=fileStore.get(sha1);"
@@ -485,9 +536,7 @@ static const char *LANDING_PAGE_HTML_SUFFIX =
     "const a=document.createElement('a');a.href=url;a.download=entry.name||'file';a.click();"
     "setTimeout(()=>URL.revokeObjectURL(url),2000);"
     "}else{"
-    "pendingRequests.add(sha1);"
-    "wsSend({type:'file_request',sha1:sha1,from:clientId});"
-    "$('status').textContent='Requesting file...';"
+    "try{await downloadFileHttp(sha1);}catch(err){console.error('HTTP download failed:',err);pendingRequests.add(sha1);wsSend({type:'file_request',sha1:sha1,from:clientId});}"
     "}};"
     "async function reportClient(info){"
     "try{const body='callsign='+encodeURIComponent(info.callsign||'')+'&npub='+encodeURIComponent(info.npub||'')+'&mode='+(info.mode||'')+'&error='+(info.error||'');"
@@ -508,6 +557,52 @@ static const char *LANDING_PAGE_HTML_SUFFIX =
     "offset+=CHUNK_SIZE;seq++;"
     "}"
     "wsSend({type:'file_complete',to:toId,from:clientId,sha1:sha1,name:name,size:size,mime:mime,chunks:seq});"
+    "}"
+    "const HTTP_CHUNK_SIZE=16384;"
+    "async function uploadFileHttp(file,sha1){"
+    "console.log('[UL] Starting upload:',file.name,file.size,'bytes, sha1:',sha1);"
+    "const total=Math.ceil(file.size/HTTP_CHUNK_SIZE);"
+    "console.log('[UL] Total chunks:',total);"
+    "let retries=0;const MAX_RETRIES=120;"
+    "for(let i=0;i<total;i++){"
+    "const slice=file.slice(i*HTTP_CHUNK_SIZE,(i+1)*HTTP_CHUNK_SIZE);"
+    "const data=base64FromBytes(new Uint8Array(await slice.arrayBuffer()));"
+    "console.log('[UL] Uploading chunk',i,'/',total,'data len:',data.length);"
+    "while(true){"
+    "const body='sha1='+encodeURIComponent(sha1)+'&chunk='+i+'&total_chunks='+total+'&filename='+encodeURIComponent(file.name)+'&mime='+encodeURIComponent(file.type||'')+'&size='+file.size+'&data='+encodeURIComponent(data);"
+    "const resp=await fetch('/api/file/upload',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:body});"
+    "const r=await resp.json();"
+    "console.log('[UL] Response:',r.status,r.msg||'');"
+    "if(r.status==='accepted'||r.status==='delivered'){$('status').textContent='Uploading '+(i+1)+'/'+total+'...';retries=0;break;}"
+    "if(r.status==='wait'){retries++;console.log('[UL] Wait, retry',retries);if(retries>MAX_RETRIES){$('status').textContent='Upload timeout';throw new Error('Timeout');}$('status').textContent='Waiting for receiver ('+(i+1)+'/'+total+')...';await new Promise(r=>setTimeout(r,500));continue;}"
+    "console.log('[UL] Error:',r.msg);$('status').textContent='Upload failed: '+(r.msg||'Unknown');throw new Error(r.msg||'Upload failed');"
+    "}"
+    "}"
+    "console.log('[UL] Upload complete!');"
+    "$('status').textContent='Upload complete!';"
+    "}"
+    "async function downloadFileHttp(sha1){"
+    "console.log('[DL] Starting download for',sha1);"
+    "const chunks=[];let chunk=0,total=null,filename='file',mime='';"
+    "let retries=0;const MAX_RETRIES=120;"
+    "$('status').textContent='Requesting file...';"
+    "while(true){"
+    "console.log('[DL] Requesting chunk',chunk);"
+    "const resp=await fetch('/api/file/download?sha1='+encodeURIComponent(sha1)+'&chunk='+chunk);"
+    "const r=await resp.json();"
+    "console.log('[DL] Response:',r.status,r.chunk,'/',r.total);"
+    "if(r.status==='complete'){console.log('[DL] Complete status received');$('status').textContent='Download complete!';break;}"
+    "if(r.status==='wait'){retries++;console.log('[DL] Wait, retry',retries);if(retries>MAX_RETRIES){$('status').textContent='Download timeout';throw new Error('Timeout');}$('status').textContent='Waiting for chunk '+(chunk+1)+'...';await new Promise(r=>setTimeout(r,500));continue;}"
+    "if(r.status==='ok'){console.log('[DL] Got chunk',r.chunk,'data len:',r.data?.length);chunks.push(bytesFromBase64(r.data));total=r.total;filename=r.filename||filename;mime=r.mime||mime;$('status').textContent='Downloading '+(chunk+1)+'/'+total+'...';chunk++;retries=0;if(chunk>=total){console.log('[DL] All chunks received');break;}}"
+    "else{console.log('[DL] Error:',r.msg);$('status').textContent='Download failed: '+(r.msg||'Unknown');throw new Error(r.msg||'Download failed');}"
+    "}"
+    "console.log('[DL] Building blob from',chunks.length,'chunks');"
+    "const blob=new Blob(chunks,{type:mime});"
+    "fileStore.set(sha1,{blob:blob,name:filename,size:blob.size,mime:mime});"
+    "const url=URL.createObjectURL(blob);"
+    "const a=document.createElement('a');a.href=url;a.download=filename;a.click();"
+    "setTimeout(()=>URL.revokeObjectURL(url),2000);"
+    "console.log('[DL] Download triggered for',filename);"
     "}"
     "function handleWsMessage(msg){"
     "if(!msg||!msg.type)return;"
@@ -1119,6 +1214,336 @@ static const httpd_uri_t uri_api_chat_client = {
 #endif // CHAT_ENABLED
 
 // ============================================================================
+// File Transfer Relay Handlers
+// ============================================================================
+
+/**
+ * @brief Check if transfer has timed out and reset if needed
+ */
+static void file_transfer_check_timeout(void)
+{
+    if (!s_transfer.active) return;
+
+    int64_t now = esp_timer_get_time() / 1000;  // Convert to ms
+    if (now - s_transfer.last_activity > FILE_TRANSFER_TIMEOUT_MS) {
+        ESP_LOGW(TAG, "File transfer timeout, resetting");
+        memset(&s_transfer, 0, sizeof(s_transfer));
+    }
+}
+
+/**
+ * @brief Handler for POST /api/file/upload - upload a chunk
+ */
+static esp_err_t api_file_upload_post_handler(httpd_req_t *req)
+{
+    file_transfer_check_timeout();
+
+    // Allocate buffer for JSON request (chunk data is base64 encoded, so ~22KB max)
+    size_t buf_size = 32768;
+    char *content = malloc(buf_size);
+    if (!content) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Out of memory");
+        return ESP_FAIL;
+    }
+
+    int total_len = req->content_len;
+    if (total_len >= (int)buf_size) {
+        free(content);
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Content too long");
+        return ESP_FAIL;
+    }
+
+    int ret = httpd_req_recv(req, content, total_len);
+    if (ret <= 0) {
+        free(content);
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Failed to receive data");
+        return ESP_FAIL;
+    }
+    content[total_len] = '\0';
+
+    // Extract fields from form data
+    char sha1[41] = {0};
+    char chunk_str[16] = {0};
+    char total_chunks_str[16] = {0};
+    char filename[65] = {0};
+    char mime[33] = {0};
+    char size_str[16] = {0};
+    char data_b64[24000] = {0};  // Base64 encoded chunk (16KB -> ~22KB)
+
+    extract_form_value(content, "sha1", sha1, sizeof(sha1));
+    extract_form_value(content, "chunk", chunk_str, sizeof(chunk_str));
+    extract_form_value(content, "total_chunks", total_chunks_str, sizeof(total_chunks_str));
+    extract_form_value(content, "filename", filename, sizeof(filename));
+    extract_form_value(content, "mime", mime, sizeof(mime));
+    extract_form_value(content, "size", size_str, sizeof(size_str));
+    extract_form_value(content, "data", data_b64, sizeof(data_b64));
+
+    free(content);
+
+    // Validate required fields
+    if (strlen(sha1) != 40 || strlen(chunk_str) == 0 || strlen(data_b64) == 0) {
+        httpd_resp_set_type(req, "application/json");
+        httpd_resp_send(req, "{\"status\":\"error\",\"msg\":\"Missing required fields\"}", -1);
+        return ESP_OK;
+    }
+
+    int chunk = atoi(chunk_str);
+    int total_chunks = atoi(total_chunks_str);
+    size_t total_size = (size_t)atol(size_str);
+
+    // Decode base64 data
+    size_t data_len = 0;
+    int mbret = mbedtls_base64_decode(s_chunk_buffer, FILE_CHUNK_SIZE, &data_len,
+                                       (const unsigned char *)data_b64, strlen(data_b64));
+    if (mbret != 0) {
+        httpd_resp_set_type(req, "application/json");
+        httpd_resp_send(req, "{\"status\":\"error\",\"msg\":\"Invalid base64 data\"}", -1);
+        return ESP_OK;
+    }
+
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
+
+    // First chunk - initialize transfer
+    if (chunk == 0) {
+        if (s_transfer.active && strcmp(s_transfer.sha1, sha1) != 0) {
+            // Different transfer in progress
+            httpd_resp_send(req, "{\"status\":\"error\",\"msg\":\"Another transfer in progress\"}", -1);
+            return ESP_OK;
+        }
+
+        // Initialize new transfer
+        memset(&s_transfer, 0, sizeof(s_transfer));
+        strncpy(s_transfer.sha1, sha1, sizeof(s_transfer.sha1) - 1);
+        strncpy(s_transfer.filename, filename, sizeof(s_transfer.filename) - 1);
+        strncpy(s_transfer.mime, mime, sizeof(s_transfer.mime) - 1);
+        s_transfer.total_size = total_size;
+        s_transfer.total_chunks = total_chunks > 0 ? total_chunks : 1;
+        s_transfer.current_chunk = 0;
+        s_transfer.chunk_data = s_chunk_buffer;
+        s_transfer.chunk_len = data_len;
+        s_transfer.chunk_delivered = false;
+        s_transfer.last_activity = esp_timer_get_time() / 1000;
+        s_transfer.active = true;
+
+        ESP_LOGI(TAG, "FILE upload: sha1=%.8s chunk=%d/%d delivered=%d datalen=%zu",
+                 sha1, 0, s_transfer.total_chunks, s_transfer.chunk_delivered, data_len);
+        ESP_LOGI(TAG, "FILE upload started: %s (%zu bytes, %d chunks)",
+                 filename, total_size, s_transfer.total_chunks);
+        httpd_resp_send(req, "{\"status\":\"accepted\"}", -1);
+        return ESP_OK;
+    }
+
+    // Subsequent chunks
+    if (!s_transfer.active || strcmp(s_transfer.sha1, sha1) != 0) {
+        httpd_resp_send(req, "{\"status\":\"error\",\"msg\":\"No active transfer or SHA1 mismatch\"}", -1);
+        return ESP_OK;
+    }
+
+    // Check sequence
+    if (chunk != s_transfer.current_chunk + 1) {
+        char resp[100];
+        snprintf(resp, sizeof(resp), "{\"status\":\"error\",\"msg\":\"Expected chunk %d, got %d\"}",
+                 s_transfer.current_chunk + 1, chunk);
+        httpd_resp_send(req, resp, -1);
+        return ESP_OK;
+    }
+
+    // Check if previous chunk was delivered
+    if (!s_transfer.chunk_delivered) {
+        httpd_resp_send(req, "{\"status\":\"wait\"}", -1);
+        return ESP_OK;
+    }
+
+    // Accept new chunk
+    s_transfer.current_chunk = chunk;
+    s_transfer.chunk_len = data_len;
+    s_transfer.chunk_delivered = false;
+    s_transfer.last_activity = esp_timer_get_time() / 1000;
+
+    ESP_LOGI(TAG, "FILE upload: sha1=%.8s chunk=%d/%d delivered=%d datalen=%zu",
+             sha1, chunk, s_transfer.total_chunks, s_transfer.chunk_delivered, data_len);
+    ESP_LOGI(TAG, "FILE upload chunk %d/%d accepted", chunk + 1, s_transfer.total_chunks);
+    httpd_resp_send(req, "{\"status\":\"delivered\"}", -1);
+    return ESP_OK;
+}
+
+/**
+ * @brief Handler for GET /api/file/download - download a chunk
+ */
+static esp_err_t api_file_download_get_handler(httpd_req_t *req)
+{
+    file_transfer_check_timeout();
+
+    // Parse query parameters
+    char query[128] = {0};
+    if (httpd_req_get_url_query_str(req, query, sizeof(query)) != ESP_OK) {
+        httpd_resp_set_type(req, "application/json");
+        httpd_resp_send(req, "{\"status\":\"error\",\"msg\":\"Missing query parameters\"}", -1);
+        return ESP_OK;
+    }
+
+    char sha1[41] = {0};
+    char chunk_str[16] = {0};
+    httpd_query_key_value(query, "sha1", sha1, sizeof(sha1));
+    httpd_query_key_value(query, "chunk", chunk_str, sizeof(chunk_str));
+
+    if (strlen(sha1) != 40) {
+        httpd_resp_set_type(req, "application/json");
+        httpd_resp_send(req, "{\"status\":\"error\",\"msg\":\"Invalid SHA1\"}", -1);
+        return ESP_OK;
+    }
+
+    int requested_chunk = atoi(chunk_str);
+
+    ESP_LOGI(TAG, "FILE download: sha1=%.8s req_chunk=%d active=%d curr=%d/%d delivered=%d",
+             sha1, requested_chunk, s_transfer.active, s_transfer.current_chunk,
+             s_transfer.total_chunks, s_transfer.chunk_delivered);
+
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
+
+    // Check if we have an active transfer for this SHA1
+    if (!s_transfer.active || strcmp(s_transfer.sha1, sha1) != 0) {
+        ESP_LOGW(TAG, "FILE download: no active transfer for sha1=%.8s", sha1);
+        httpd_resp_send(req, "{\"status\":\"error\",\"msg\":\"No active transfer\"}", -1);
+        return ESP_OK;
+    }
+
+    // Check if requesting the correct chunk
+    if (requested_chunk != s_transfer.current_chunk) {
+        if (requested_chunk > s_transfer.current_chunk) {
+            // Chunk not uploaded yet
+            httpd_resp_send(req, "{\"status\":\"wait\"}", -1);
+            return ESP_OK;
+        }
+        // Requesting old chunk - might have missed it
+        httpd_resp_send(req, "{\"status\":\"error\",\"msg\":\"Chunk already passed\"}", -1);
+        return ESP_OK;
+    }
+
+    // Check if this is the last chunk and already delivered (transfer complete)
+    if (s_transfer.chunk_delivered && requested_chunk == s_transfer.total_chunks - 1) {
+        // Transfer complete, reset state
+        memset(&s_transfer, 0, sizeof(s_transfer));
+        httpd_resp_send(req, "{\"status\":\"complete\"}", -1);
+        return ESP_OK;
+    }
+
+    // Encode chunk data to base64
+    size_t b64_len = 0;
+    char *b64_data = malloc(s_transfer.chunk_len * 2 + 10);  // Generous buffer
+    if (!b64_data) {
+        httpd_resp_send(req, "{\"status\":\"error\",\"msg\":\"Out of memory\"}", -1);
+        return ESP_OK;
+    }
+
+    int mbret = mbedtls_base64_encode((unsigned char *)b64_data, s_transfer.chunk_len * 2,
+                                       &b64_len, s_transfer.chunk_data, s_transfer.chunk_len);
+    if (mbret != 0) {
+        free(b64_data);
+        httpd_resp_send(req, "{\"status\":\"error\",\"msg\":\"Base64 encode failed\"}", -1);
+        return ESP_OK;
+    }
+    b64_data[b64_len] = '\0';
+
+    // Escape filename and MIME for JSON safety
+    char escaped_filename[130];  // 2x filename size for worst case
+    char escaped_mime[66];       // 2x mime size for worst case
+    json_escape_string(escaped_filename, sizeof(escaped_filename), s_transfer.filename);
+    json_escape_string(escaped_mime, sizeof(escaped_mime), s_transfer.mime);
+
+    // Build response (extra space for escaped filename/mime)
+    size_t resp_size = b64_len + 512;
+    char *response = malloc(resp_size);
+    if (!response) {
+        free(b64_data);
+        httpd_resp_send(req, "{\"status\":\"error\",\"msg\":\"Out of memory\"}", -1);
+        return ESP_OK;
+    }
+
+    snprintf(response, resp_size,
+             "{\"status\":\"ok\",\"chunk\":%d,\"total\":%d,\"data\":\"%s\",\"filename\":\"%s\",\"mime\":\"%s\"}",
+             s_transfer.current_chunk, s_transfer.total_chunks,
+             b64_data, escaped_filename, escaped_mime);
+
+    // Mark chunk as delivered
+    s_transfer.chunk_delivered = true;
+    s_transfer.last_activity = esp_timer_get_time() / 1000;
+
+    ESP_LOGI(TAG, "FILE download chunk %d/%d delivered",
+             s_transfer.current_chunk + 1, s_transfer.total_chunks);
+
+    httpd_resp_send(req, response, -1);
+
+    free(b64_data);
+    free(response);
+
+    // Note: State is NOT reset here - the JS client checks if(chunk>=total) to know
+    // when all chunks are received. State will be reset by timeout or next transfer.
+
+    return ESP_OK;
+}
+
+/**
+ * @brief Handler for GET /api/file/status - check transfer status
+ */
+static esp_err_t api_file_status_get_handler(httpd_req_t *req)
+{
+    file_transfer_check_timeout();
+
+    char query[128] = {0};
+    httpd_req_get_url_query_str(req, query, sizeof(query));
+
+    char sha1[41] = {0};
+    httpd_query_key_value(query, "sha1", sha1, sizeof(sha1));
+
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
+
+    if (!s_transfer.active) {
+        httpd_resp_send(req, "{\"active\":false}", -1);
+        return ESP_OK;
+    }
+
+    if (strlen(sha1) > 0 && strcmp(s_transfer.sha1, sha1) != 0) {
+        httpd_resp_send(req, "{\"active\":false,\"msg\":\"Different transfer in progress\"}", -1);
+        return ESP_OK;
+    }
+
+    char response[256];
+    snprintf(response, sizeof(response),
+             "{\"active\":true,\"sha1\":\"%s\",\"current_chunk\":%d,\"total_chunks\":%d,\"delivered\":%s,\"filename\":\"%s\"}",
+             s_transfer.sha1, s_transfer.current_chunk, s_transfer.total_chunks,
+             s_transfer.chunk_delivered ? "true" : "false", s_transfer.filename);
+
+    httpd_resp_send(req, response, -1);
+    return ESP_OK;
+}
+
+// File transfer URI definitions
+static const httpd_uri_t uri_api_file_upload = {
+    .uri = "/api/file/upload",
+    .method = HTTP_POST,
+    .handler = api_file_upload_post_handler,
+    .user_ctx = NULL
+};
+
+static const httpd_uri_t uri_api_file_download = {
+    .uri = "/api/file/download",
+    .method = HTTP_GET,
+    .handler = api_file_download_get_handler,
+    .user_ctx = NULL
+};
+
+static const httpd_uri_t uri_api_file_status = {
+    .uri = "/api/file/status",
+    .method = HTTP_GET,
+    .handler = api_file_status_get_handler,
+    .user_ctx = NULL
+};
+
+// ============================================================================
 // URI definitions
 // ============================================================================
 
@@ -1194,7 +1619,7 @@ esp_err_t http_server_start_ex(wifi_config_callback_t callback, bool enable_stat
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.lru_purge_enable = true;
     config.stack_size = 32768;
-    config.max_uri_handlers = 16;
+    config.max_uri_handlers = 20;
 
     ESP_LOGI(TAG, "Starting HTTP server on port %d (station_api=%d)", config.server_port, enable_station_api);
 
@@ -1228,6 +1653,12 @@ esp_err_t http_server_start_ex(wifi_config_callback_t callback, bool enable_stat
         mesh_chat_init();
         ESP_LOGI(TAG, "Chat API endpoints registered");
 #endif
+
+        // Register file transfer relay handlers
+        httpd_register_uri_handler(s_server, &uri_api_file_upload);
+        httpd_register_uri_handler(s_server, &uri_api_file_download);
+        httpd_register_uri_handler(s_server, &uri_api_file_status);
+        ESP_LOGI(TAG, "File transfer API endpoints registered");
 
         // Register WebSocket handler
         ret = ws_server_register(s_server);
