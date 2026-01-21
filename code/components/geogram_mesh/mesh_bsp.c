@@ -37,6 +37,36 @@ __attribute__((weak)) void ip_napt_table_clear(void)
 static const char *TAG = "mesh_bsp";
 
 // ============================================================================
+// SSID construction callback for ESP-Mesh-Lite peer discovery
+// ============================================================================
+
+/**
+ * @brief Callback to construct SSID from MAC address for mesh peer discovery
+ *
+ * ESP-Mesh-Lite discovers peers via vendor IEs in beacon frames, but needs
+ * to know the exact SSID to connect to. Since we use CONFIG_BRIDGE_SOFTAP_SSID_END_WITH_THE_MAC,
+ * each node has SSID format: "geogram_XXXXXX" where XXXXXX is last 3 MAC bytes.
+ *
+ * This callback is called during scan when a mesh peer is found via vendor IE.
+ * It returns the expected SSID for that peer based on its BSSID (AP MAC).
+ */
+static const uint8_t* mesh_get_ssid_by_mac(const uint8_t *bssid)
+{
+    if (bssid == NULL) {
+        return NULL;
+    }
+
+    // Generate SSID with MAC suffix: "geogram_XXXXXX"
+    static uint8_t ssid[33];
+    snprintf((char *)ssid, sizeof(ssid), "%s_%02x%02x%02x",
+             CONFIG_BRIDGE_SOFTAP_SSID,
+             bssid[3], bssid[4], bssid[5]);
+
+    ESP_LOGI(TAG, "[MESH] Constructed SSID for peer: %s", ssid);
+    return ssid;
+}
+
+// ============================================================================
 // Configuration defaults
 // ============================================================================
 
@@ -313,13 +343,37 @@ esp_err_t geogram_mesh_start(const geogram_mesh_config_t *config)
     ESP_LOGI(TAG, "[START] Mesh ID set to: 0x%02X ('%c')", config->mesh_id[0], config->mesh_id[0]);
 
     // Configure root/node behavior based on allow_root setting
-    // ESP-Mesh-Lite root election: nodes scan for existing mesh networks.
-    // If found, they join as child. If not found, they become root.
+    // ESP-Mesh-Lite requires explicit root designation in router-less mesh.
+    //
+    // Strategy for router-less auto-election:
+    // - Use MAC address to deterministically elect root
+    // - Node with LOWEST STA MAC becomes root (level 1 only)
+    // - All other nodes become children (levels 2+)
+    // - This ensures exactly one root in any mesh topology
+    //
     if (config->allow_root) {
-        // Allow this node to be root OR child - mesh-lite will auto-negotiate
-        // First node to boot becomes root, others join as children
-        // No need to call set_allowed_level/set_disallowed_level - let mesh-lite decide
-        ESP_LOGI(TAG, "[START] Node can be ROOT or CHILD (auto-negotiate, levels 1-%d)", s_max_layer);
+        // Get our STA MAC address for comparison
+        uint8_t sta_mac[6];
+        esp_wifi_get_mac(WIFI_IF_STA, sta_mac);
+
+        // Use last 3 bytes of MAC as a simple unique identifier
+        uint32_t my_id = (sta_mac[3] << 16) | (sta_mac[4] << 8) | sta_mac[5];
+
+        // For deterministic root election: use static threshold
+        // Node with MAC ID below threshold = root, above = child
+        // 0xe2d800 is between node0 (0xe2d518) and node1 (0xe2dcd0)
+        const uint32_t root_threshold = 0xe2d800;
+        bool should_be_root = (my_id < root_threshold);
+
+        if (should_be_root) {
+            // This node becomes root (level 1 only)
+            esp_mesh_lite_set_allowed_level(1);
+            ESP_LOGI(TAG, "[START] Node elected as ROOT (level 1), MAC ID: 0x%06lX < threshold", (unsigned long)my_id);
+        } else {
+            // This node becomes child (level 2+)
+            esp_mesh_lite_set_disallowed_level(1);
+            ESP_LOGI(TAG, "[START] Node elected as CHILD (level 2+), MAC ID: 0x%06lX >= threshold", (unsigned long)my_id);
+        }
     } else {
         // This node can only be a child, never root
         esp_mesh_lite_set_disallowed_level(1);
@@ -328,6 +382,12 @@ esp_err_t geogram_mesh_start(const geogram_mesh_config_t *config)
 
     // Also set softap info for mesh-lite (after init, before start)
     esp_mesh_lite_set_softap_info(CONFIG_BRIDGE_SOFTAP_SSID, CONFIG_BRIDGE_SOFTAP_PASSWORD);
+
+    // Register SSID callback for mesh peer discovery
+    // This tells mesh-lite how to construct SSID from MAC when connecting to peers
+    // whitelist=false means "this is how to generate SSID for any peer"
+    esp_mesh_lite_get_ssid_by_mac_cb_register(mesh_get_ssid_by_mac, false);
+    ESP_LOGI(TAG, "[START] Registered SSID-by-MAC callback for peer discovery");
 
     // Start mesh-lite (returns void)
     esp_mesh_lite_start();
