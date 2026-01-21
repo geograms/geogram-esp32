@@ -44,11 +44,12 @@ static const char *TAG = "mesh_bsp";
  * @brief Callback to construct SSID from MAC address for mesh peer discovery
  *
  * ESP-Mesh-Lite discovers peers via vendor IEs in beacon frames, but needs
- * to know the exact SSID to connect to. Since we use CONFIG_BRIDGE_SOFTAP_SSID_END_WITH_THE_MAC,
- * each node has SSID format: "geogram_XXXXXX" where XXXXXX is last 3 MAC bytes.
+ * to know the exact SSID to connect to. All nodes use the same SSID "geogram"
+ * so phones can auto-connect. Mesh peers are distinguished by BSSID, not SSID.
  *
  * This callback is called during scan when a mesh peer is found via vendor IE.
- * It returns the expected SSID for that peer based on its BSSID (AP MAC).
+ * It returns the common SSID for all peers - mesh-lite uses BSSID to connect
+ * to the specific node.
  */
 static const uint8_t* mesh_get_ssid_by_mac(const uint8_t *bssid)
 {
@@ -56,13 +57,13 @@ static const uint8_t* mesh_get_ssid_by_mac(const uint8_t *bssid)
         return NULL;
     }
 
-    // Generate SSID with MAC suffix: "geogram_XXXXXX"
+    // All nodes use the same SSID for phone auto-connect
+    // Mesh discovery uses vendor IEs, connection uses BSSID
     static uint8_t ssid[33];
-    snprintf((char *)ssid, sizeof(ssid), "%s_%02x%02x%02x",
-             CONFIG_BRIDGE_SOFTAP_SSID,
-             bssid[3], bssid[4], bssid[5]);
+    snprintf((char *)ssid, sizeof(ssid), "%s", CONFIG_BRIDGE_SOFTAP_SSID);
 
-    ESP_LOGI(TAG, "[MESH] Constructed SSID for peer: %s", ssid);
+    ESP_LOGI(TAG, "[MESH] Peer BSSID: %02x:%02x:%02x:%02x:%02x:%02x -> SSID: %s",
+             bssid[0], bssid[1], bssid[2], bssid[3], bssid[4], bssid[5], ssid);
     return ssid;
 }
 
