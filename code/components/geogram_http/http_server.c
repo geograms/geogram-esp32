@@ -1652,6 +1652,9 @@ esp_err_t http_server_start_ex(wifi_config_callback_t callback, bool enable_stat
     config.lru_purge_enable = true;
     config.stack_size = 32768;
     config.max_uri_handlers = 20;
+    config.max_open_sockets = 13;  // Increased for mesh + multiple clients
+    config.recv_wait_timeout = 5;  // Shorter timeout to free sockets faster
+    config.send_wait_timeout = 5;
 
     ESP_LOGI(TAG, "Starting HTTP server on port %d (station_api=%d)", config.server_port, enable_station_api);
 
