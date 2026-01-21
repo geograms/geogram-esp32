@@ -158,6 +158,18 @@ uint8_t geogram_mesh_get_subnet_id(void);
  */
 esp_err_t geogram_mesh_get_parent_mac(uint8_t *mac);
 
+/**
+ * @brief Check if this node has a parent (connected to mesh)
+ * @return true if connected to a parent mesh node
+ */
+bool geogram_mesh_has_parent(void);
+
+/**
+ * @brief Get number of other mesh nodes we're connected to
+ * @return Number of peer mesh nodes (total mesh nodes - 1)
+ */
+size_t geogram_mesh_get_peer_count(void);
+
 // ============================================================================
 // External SoftAP (for phones)
 // ============================================================================

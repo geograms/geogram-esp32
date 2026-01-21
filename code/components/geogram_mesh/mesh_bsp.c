@@ -291,6 +291,15 @@ esp_err_t geogram_mesh_start(const geogram_mesh_config_t *config)
         return ret;
     }
 
+    // Configure SoftAP SSID BEFORE mesh-lite init (following led_light example pattern)
+    // Only set SSID and password, let bridge handle other config
+    wifi_config_t wifi_cfg;
+    memset(&wifi_cfg, 0x0, sizeof(wifi_config_t));
+    snprintf((char *)wifi_cfg.ap.ssid, sizeof(wifi_cfg.ap.ssid), "%s", CONFIG_BRIDGE_SOFTAP_SSID);
+    strlcpy((char *)wifi_cfg.ap.password, CONFIG_BRIDGE_SOFTAP_PASSWORD, sizeof(wifi_cfg.ap.password));
+    esp_bridge_wifi_set_config(WIFI_IF_AP, &wifi_cfg);
+    ESP_LOGI(TAG, "[START] SoftAP SSID configured: %s", CONFIG_BRIDGE_SOFTAP_SSID);
+
     // Configure ESP-Mesh-Lite using the default config from Kconfig
     esp_mesh_lite_config_t mesh_lite_config = ESP_MESH_LITE_DEFAULT_INIT();
 
@@ -298,29 +307,37 @@ esp_err_t geogram_mesh_start(const geogram_mesh_config_t *config)
     esp_mesh_lite_init(&mesh_lite_config);
     ESP_LOGI(TAG, "[START] Mesh-lite initialized");
 
+    // Override mesh_id from our config (use first byte - ESP-Mesh-Lite uses single byte)
+    // This ensures all nodes with same config join the same mesh network
+    esp_mesh_lite_set_mesh_id(config->mesh_id[0], false);
+    ESP_LOGI(TAG, "[START] Mesh ID set to: 0x%02X ('%c')", config->mesh_id[0], config->mesh_id[0]);
+
     // Configure root/node behavior based on allow_root setting
-    // For router-less single-node setup, we force this node to be root only
+    // ESP-Mesh-Lite root election: nodes scan for existing mesh networks.
+    // If found, they join as child. If not found, they become root.
     if (config->allow_root) {
-        // Force this node to be root (level 1 only)
-        // Disallow all child levels so it doesn't try to find a parent
-        esp_mesh_lite_set_allowed_level(1);
-        for (int level = 2; level <= s_max_layer; level++) {
-            esp_mesh_lite_set_disallowed_level(level);
-        }
-        ESP_LOGI(TAG, "[START] Node forced to be ROOT ONLY (level 1)");
+        // Allow this node to be root OR child - mesh-lite will auto-negotiate
+        // First node to boot becomes root, others join as children
+        // No need to call set_allowed_level/set_disallowed_level - let mesh-lite decide
+        ESP_LOGI(TAG, "[START] Node can be ROOT or CHILD (auto-negotiate, levels 1-%d)", s_max_layer);
     } else {
-        // This node can only be a child, not root
+        // This node can only be a child, never root
         esp_mesh_lite_set_disallowed_level(1);
-        // Allow all child levels up to max
-        for (int level = 2; level <= s_max_layer; level++) {
-            esp_mesh_lite_set_allowed_level(level);
-        }
         ESP_LOGI(TAG, "[START] Node set as CHILD ONLY (levels 2-%d)", s_max_layer);
     }
+
+    // Also set softap info for mesh-lite (after init, before start)
+    esp_mesh_lite_set_softap_info(CONFIG_BRIDGE_SOFTAP_SSID, CONFIG_BRIDGE_SOFTAP_PASSWORD);
 
     // Start mesh-lite (returns void)
     esp_mesh_lite_start();
     ESP_LOGI(TAG, "[START] Mesh-lite started");
+
+    // Log the actual SoftAP SSID being used
+    wifi_config_t current_ap_config;
+    if (esp_wifi_get_config(WIFI_IF_AP, &current_ap_config) == ESP_OK) {
+        ESP_LOGI(TAG, "[START] Actual SoftAP SSID: %s", (char*)current_ap_config.ap.ssid);
+    }
 
     s_started = true;
     s_status = GEOGRAM_MESH_STATUS_STARTED;
@@ -395,6 +412,35 @@ esp_err_t geogram_mesh_get_parent_mac(uint8_t *mac)
 
     memcpy(mac, s_parent_mac, 6);
     return ESP_OK;
+}
+
+bool geogram_mesh_has_parent(void)
+{
+    return s_has_parent;
+}
+
+size_t geogram_mesh_get_peer_count(void)
+{
+    // Count mesh peers we're connected to:
+    // - Child node (has parent): at least 1 peer (the parent)
+    // - Root node: use esp_mesh_lite_get_mesh_node_number() which returns children count
+    //
+    // Note: esp_mesh_lite_get_mesh_node_number() counts nodes that REPORTED to root,
+    // which means it returns the number of CHILDREN, not including root itself.
+    // Requires CONFIG_MESH_LITE_NODE_INFO_REPORT=y to work.
+
+    if (s_has_parent) {
+        // This node is a child, connected to parent
+        return 1;
+    }
+
+    if (s_is_root && s_status == GEOGRAM_MESH_STATUS_ROOT) {
+        // This node is root - get count of children that reported
+        uint32_t children = esp_mesh_lite_get_mesh_node_number();
+        return children;  // Already excludes self
+    }
+
+    return 0;
 }
 
 // ============================================================================
@@ -723,13 +769,22 @@ static void wifi_event_handler(void *arg, esp_event_base_t event_base,
             break;
         }
 
-        case WIFI_EVENT_STA_CONNECTED:
-            ESP_LOGI(TAG, "[STA] Connected to parent AP");
+        case WIFI_EVENT_STA_CONNECTED: {
+            wifi_event_sta_connected_t *event = (wifi_event_sta_connected_t *)event_data;
+            memcpy(s_parent_mac, event->bssid, 6);
+            s_has_parent = true;
+            ESP_LOGI(TAG, "[STA] Connected to parent AP: " MACSTR " (ch=%d)",
+                     MAC2STR(event->bssid), event->channel);
             break;
+        }
 
-        case WIFI_EVENT_STA_DISCONNECTED:
-            ESP_LOGW(TAG, "[STA] Disconnected from parent AP");
+        case WIFI_EVENT_STA_DISCONNECTED: {
+            wifi_event_sta_disconnected_t *event = (wifi_event_sta_disconnected_t *)event_data;
+            ESP_LOGW(TAG, "[STA] Disconnected from parent AP (reason=%d)", event->reason);
+            s_has_parent = false;
+            memset(s_parent_mac, 0, 6);
             break;
+        }
 
         default:
             break;

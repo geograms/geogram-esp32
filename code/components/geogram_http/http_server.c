@@ -492,7 +492,7 @@ static const char *LANDING_PAGE_HTML_SUFFIX =
     "if(d.latest_id>lastId)lastId=d.latest_id;"
     "const stationText=d.my_callsign?('Connected to station '+d.my_callsign):'Connected';"
     "$('status').textContent=stationText;"
-    "$('count').textContent='';"
+    "$('count').textContent=d.mesh_peers>0?('connected to '+d.mesh_peers+' mesh node'+(d.mesh_peers>1?'s':'')):'';"
     "}catch(e){$('status').textContent='Offline';}}"
     "async function send(){"
     "const inp=$('input'),txt=inp.value.trim();"
@@ -783,13 +783,25 @@ static bool parse_sha1_hex(const char *hex, uint8_t *out)
 }
 
 /**
- * @brief Handler for captive portal detection - return 204 so devices stay connected
+ * @brief Handler for captive portal detection - redirect to main page
  */
 static esp_err_t captive_portal_handler(httpd_req_t *req)
 {
-    httpd_resp_set_status(req, "204 No Content");
+    httpd_resp_set_status(req, "302 Found");
+    httpd_resp_set_hdr(req, "Location", "http://192.168.5.1/");
     httpd_resp_send(req, NULL, 0);
     return ESP_OK;
+}
+
+/**
+ * @brief Custom 404 handler - redirect unknown URIs to main page for captive portal
+ */
+static esp_err_t http_404_redirect_handler(httpd_req_t *req, httpd_err_code_t err)
+{
+    httpd_resp_set_status(req, "302 Found");
+    httpd_resp_set_hdr(req, "Location", "http://192.168.5.1/");
+    httpd_resp_send(req, NULL, 0);
+    return ESP_FAIL;  // Close socket after redirect
 }
 
 /**
@@ -944,10 +956,11 @@ static esp_err_t api_chat_messages_get_handler(httpd_req_t *req)
     }
 
     // mesh_chat_build_json returns {"messages":[...]} so we build around it
+    // mesh_peers: number of other mesh nodes this device is connected to
     int offset = snprintf(buffer, buffer_size,
-        "{\"my_callsign\":\"%s\",\"max_len\":%d,\"count\":%d,\"latest_id\":%lu,",
+        "{\"my_callsign\":\"%s\",\"max_len\":%d,\"count\":%d,\"latest_id\":%lu,\"mesh_peers\":%d,",
         callsign, MESH_CHAT_MAX_MESSAGE_LEN, (int)mesh_chat_get_count(),
-        (unsigned long)mesh_chat_get_latest_id());
+        (unsigned long)mesh_chat_get_latest_id(), (int)geogram_mesh_get_peer_count());
 
     // mesh_chat_build_json writes {"messages":[...]} - we skip the opening { and include rest
     char *json_buf = buffer + offset;
@@ -1628,6 +1641,9 @@ esp_err_t http_server_start_ex(wifi_config_callback_t callback, bool enable_stat
         ESP_LOGE(TAG, "Failed to start HTTP server: %s", esp_err_to_name(ret));
         return ret;
     }
+
+    // Register custom 404 handler for captive portal redirect
+    httpd_register_err_handler(s_server, HTTPD_404_NOT_FOUND, http_404_redirect_handler);
 
     // Register base URI handlers
     httpd_register_uri_handler(s_server, &uri_root);
